@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>模型工坊</title>
+<style>
+body{background:#14161a;color:#e6e8eb;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;margin:0;padding:16px}
+h1{font-size:17px;margin:0 0 12px}
+pre{white-space:pre-wrap;font:12px/1.6 ui-monospace,monospace;color:#9aa1ad;background:#1e2127;padding:12px;border-radius:10px}
+</style>
+</head>
+<body>
+<h1>模型工坊</h1>
+<pre id="out">自检中…</pre>
+<script src="vendor/tf.min.js"></script>
+<script>
+const out = document.getElementById('out');
+async function run(){
+  const lines = [];
+  const native = typeof window.StudioNative !== 'undefined';
+  lines.push('原生外壳: ' + (native ? '已连接' : '浏览器预览模式'));
+  if (native) lines.push('版本: ' + StudioNative.appVersion() + ' / ' + StudioNative.platform());
+  lines.push('tfjs: ' + (typeof tf !== 'undefined' ? tf.version.tfjs : '未加载'));
+  if (typeof tf !== 'undefined') {
+    try { await tf.setBackend('webgl'); await tf.ready(); } catch(e){ await tf.setBackend('cpu'); await tf.ready(); }
+    lines.push('后端: ' + tf.getBackend());
+  }
+  out.textContent = lines.join('\n');
+}
+run();
+</script>
+</body>
+</html>
