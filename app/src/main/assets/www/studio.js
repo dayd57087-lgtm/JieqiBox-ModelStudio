@@ -182,7 +182,9 @@
     var added = 0, reused = 0;
     for (var i = 0; i < files.length; i++) {
       var f = files[i];
-      if (!/^image\//.test(f.type)) continue;
+      // SAF 选出来的 content:// 常常报空 MIME，只按 type 判断会把整批图静默丢掉
+      var looksImage = !f.type || /^image\//.test(f.type) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name || '');
+      if (!looksImage) continue;
       var key = sampleKey(f);
       var existed = samples.find(function (s) { return s.key === key; });
       if (existed) { reused++; continue; }
