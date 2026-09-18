@@ -16,17 +16,21 @@
   var COLS = 9, ROWS = 10, CELLS = COLS * ROWS;
 
   // 类别与笔刷（顺序即标签号，0 必须是 empty）
+  //
+  // c = 主色，用来把「这一格被标成了什么」一眼画出来。
+  // 以前所有标记都是同一个绿圈，看不出标的是红子还是黑子，
+  // 只能靠读圈里的字来判断，核对时很费眼。
   var CLASSES = [
-    { id: 'empty', g: '空', k: 'e' },
-    { id: 'r_general', g: '帅', k: 'r' }, { id: 'r_advisor', g: '仕', k: 'r' },
-    { id: 'r_elephant', g: '相', k: 'r' }, { id: 'r_horse', g: '马', k: 'r' },
-    { id: 'r_chariot', g: '车', k: 'r' }, { id: 'r_cannon', g: '炮', k: 'r' },
-    { id: 'r_soldier', g: '兵', k: 'r' },
-    { id: 'b_general', g: '将', k: 'b' }, { id: 'b_advisor', g: '士', k: 'b' },
-    { id: 'b_elephant', g: '象', k: 'b' }, { id: 'b_horse', g: '马', k: 'b' },
-    { id: 'b_chariot', g: '车', k: 'b' }, { id: 'b_cannon', g: '炮', k: 'b' },
-    { id: 'b_soldier', g: '卒', k: 'b' },
-    { id: 'dark', g: '暗', k: 'd' }
+    { id: 'empty', g: '空', k: 'e', c: '#6b7684' },
+    { id: 'r_general', g: '帅', k: 'r', c: '#e5555f' }, { id: 'r_advisor', g: '仕', k: 'r', c: '#e5555f' },
+    { id: 'r_elephant', g: '相', k: 'r', c: '#e5555f' }, { id: 'r_horse', g: '马', k: 'r', c: '#e5555f' },
+    { id: 'r_chariot', g: '车', k: 'r', c: '#e5555f' }, { id: 'r_cannon', g: '炮', k: 'r', c: '#e5555f' },
+    { id: 'r_soldier', g: '兵', k: 'r', c: '#e5555f' },
+    { id: 'b_general', g: '将', k: 'b', c: '#cbd3dd' }, { id: 'b_advisor', g: '士', k: 'b', c: '#cbd3dd' },
+    { id: 'b_elephant', g: '象', k: 'b', c: '#cbd3dd' }, { id: 'b_horse', g: '马', k: 'b', c: '#cbd3dd' },
+    { id: 'b_chariot', g: '车', k: 'b', c: '#cbd3dd' }, { id: 'b_cannon', g: '炮', k: 'b', c: '#cbd3dd' },
+    { id: 'b_soldier', g: '卒', k: 'b', c: '#cbd3dd' },
+    { id: 'dark', g: '暗', k: 'd', c: '#8b94a1' }
   ];
   var LABEL_IDS = CLASSES.map(function (c) { return c.id; });
   var NC = CLASSES.length;
@@ -85,9 +89,27 @@
     });
   }
 
+  /**
+   * 画布 -> Blob。
+   *
+   * 不用 canvas.toBlob：它在部分 WebView 里回调**根本不触发**（实测 JPEG/PNG 都是
+   * 100% 超时），整个流程会静默卡死在那次 await 上。
+   * toDataURL 是同步的、到处都能用，虽然编码在主线程上，但一次几十毫秒可以接受。
+   */
   function canvasToBlob(cv, type, q) {
-    return new Promise(function (res) {
-      cv.toBlob(function (b) { res(b); }, type || 'image/jpeg', q === undefined ? 0.86 : q);
+    return new Promise(function (res, rej) {
+      var mime = type || 'image/jpeg';
+      try {
+        var url = cv.toDataURL(mime, q === undefined ? 0.86 : q);
+        var comma = url.indexOf(',');
+        if (comma < 0) throw new Error('画布编码失败');
+        var bin = atob(url.slice(comma + 1));
+        var u8 = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        res(new Blob([u8], { type: mime }));
+      } catch (e) {
+        rej(e);
+      }
     });
   }
 
@@ -179,8 +201,12 @@
 
   async function importFiles(files) {
     if (!files || !files.length) return;
-    var added = 0, reused = 0;
-    for (var i = 0; i < files.length; i++) {
+    var added = 0, reused = 0, failed = 0;
+    var total = files.length;
+    // 批量导入几十上百张要花时间，给个明确的进度
+    setBusy(true, '导入截图', '0 / ' + total);
+    if (native()) native().keepAwake(true);
+    for (var i = 0; i < total; i++) {
       var f = files[i];
       // SAF 选出来的 content:// 常常报空 MIME，只按 type 判断会把整批图静默丢掉
       var looksImage = !f.type || /^image\//.test(f.type) || /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name || '');
@@ -202,27 +228,66 @@
         cv.getContext('2d').drawImage(im, 0, 0, w, h);
         var blob = await canvasToBlob(cv, 'image/jpeg', 0.88);
 
-        var tw = 160, th = Math.max(1, Math.round(h * (tw / w)));
-        var tc = document.createElement('canvas');
-        tc.width = tw; tc.height = th;
-        tc.getContext('2d').drawImage(cv, 0, 0, tw, th);
-        var thumb = tc.toDataURL('image/jpeg', 0.7);
+        var thumb = makeThumb(cv, w, h, null);
 
         var rec = {
           key: key, name: f.name || ('图片 ' + (samples.length + 1)),
           w: w, h: h, thumb: thumb, blob: blob,
-          lattice: null, cells: null, conf: 0
+          lattice: null, cells: null, auto: null, conf: 0
         };
         await dbPut(rec);
         samples.push(rec);
         added++;
       } catch (e) {
+        failed++;
         log('导入失败 ' + (f.name || '') + '：' + e.message);
       }
-      if (i % 5 === 4) await new Promise(function (r) { setTimeout(r, 0); });
+      $('busySub').textContent = (i + 1) + ' / ' + total;
+      if (i % 3 === 2) await yieldTick();
     }
+    if (native()) native().keepAwake(false);
+    setBusy(false);
     renderSamples();
-    toast('导入 ' + added + ' 张' + (reused ? '，跳过重复 ' + reused + ' 张' : ''));
+    var msg = '导入 ' + added + ' 张';
+    if (reused) msg += '，跳过重复 ' + reused + ' 张';
+    if (failed) msg += '，失败 ' + failed + ' 张';
+    toast(msg, 2600);
+    if (added) log('批量导入完成：' + msg);
+  }
+
+  /**
+   * 生成列表用的缩略图。
+   *
+   * 以前是整张手机截图压进去 —— 棋盘只占中间一小块，缩略图上根本看不清棋子，
+   * 卡片下方还留一大片空白。这里直接裁到棋盘范围，一目了然。
+   */
+  function makeThumb(src, w, h, lattice) {
+    var TW = 200;
+    var tc = document.createElement('canvas');
+    var tcx;
+
+    if (lattice) {
+      // 棋盘外扩半格，让边路棋子也有余量
+      var x0 = (lattice.x0 - lattice.dx * 0.5) * w;
+      var y0 = (lattice.y0 - lattice.dy * 0.5) * h;
+      var bw = lattice.dx * (COLS + 1) * w;
+      var bh = lattice.dy * (ROWS + 1) * h;
+      x0 = Math.max(0, x0); y0 = Math.max(0, y0);
+      bw = Math.min(bw, w - x0); bh = Math.min(bh, h - y0);
+
+      var TH = Math.max(1, Math.round(TW * bh / bw));
+      tc.width = TW; tc.height = TH;
+      tcx = tc.getContext('2d');
+      tcx.drawImage(src, x0, y0, bw, bh, 0, 0, TW, TH);
+    } else {
+      // 还没标定：取中间偏上那块，大致就是棋盘常在的位置
+      var ch = Math.min(h, w * (10 / 9) * 1.25);
+      tc.width = TW;
+      tc.height = Math.max(1, Math.round(TW * ch / w));
+      tcx = tc.getContext('2d');
+      tcx.drawImage(src, 0, Math.max(0, (h - ch) * 0.35), w, ch, 0, 0, TW, tc.height);
+    }
+    return tc.toDataURL('image/jpeg', 0.72);
   }
 
   function annotatedCount(s) {
@@ -240,11 +305,17 @@
       if (s.lattice && s.cells) done++;
       var el = document.createElement('button');
       el.className = 'sample' + (i === current ? ' sel' : '') + (s.lattice && s.cells ? ' done' : '');
+      var pending = 0;
+      if (s.auto) for (var q = 0; q < CELLS; q++) if (s.auto[q]) pending++;
       var st = s.lattice
-        ? (s.cells ? '已标注 ' + annotatedCount(s) + ' 子' : '待标注')
+        ? (s.cells ? '已标注 ' + annotatedCount(s) + ' 子' +
+            (pending ? ' · <span style="color:#e0a33a">' + pending + ' 待核对</span>' : '')
+          : '待标注')
         : '未标定';
+      var badge = pending ? '<span class="badge auto">模型</span>'
+        : (s.cells && annotatedCount(s) ? '<span class="badge manual">已核</span>' : '');
       el.innerHTML =
-        '<img src="' + s.thumb + '" alt="">' +
+        badge + '<img src="' + s.thumb + '" alt="">' +
         '<div class="cap"><div class="nm">' + escapeHtml(s.name) + '</div>' +
         '<div class="st">' + st + '</div></div>' +
         '<span class="del" role="button">×</span>';
@@ -269,6 +340,7 @@
       : '还没有样本。导入对局截图，或先点「生成演示局面」验证整条链路。';
     $('annotateEmpty').hidden = samples.length > 0;
     $('annotateBody').hidden = samples.length === 0;
+    updateBatchInfo();
   }
 
   function escapeHtml(s) {
@@ -341,19 +413,17 @@
       }
 
       var blob = await canvasToBlob(cv, 'image/jpeg', 0.88);
-      var tc = document.createElement('canvas');
-      tc.width = 160; tc.height = Math.round(160 * H / W);
-      tc.getContext('2d').drawImage(cv, 0, 0, tc.width, tc.height);
+      var lat = {
+        x0: (ox + GT.x0 * s) / W, dx: (GT.dx * s) / W,
+        y0: (oy + GT.y0 * s) / H, dy: (GT.dy * s) / H
+      };
 
       var rec = {
         key: 'demo-' + Date.now() + '-' + k + '-' + Math.random().toString(36).slice(2, 7),
         name: '演示局面 ' + (k + 1),
-        w: W, h: H, thumb: tc.toDataURL('image/jpeg', 0.7), blob: blob,
-        lattice: {
-          x0: (ox + GT.x0 * s) / W, dx: (GT.dx * s) / W,
-          y0: (oy + GT.y0 * s) / H, dy: (GT.dy * s) / H
-        },
-        cells: cells, conf: 99
+        w: W, h: H, thumb: makeThumb(cv, W, H, lat), blob: blob,
+        lattice: lat,
+        cells: cells, auto: null, conf: 99
       };
       await dbPut(rec);
       samples.push(rec);
@@ -386,13 +456,254 @@
   $('btnDemo').addEventListener('click', async function () {
     var n = 40;
     $('btnDemo').disabled = true;
+    setBusy(true, '生成演示局面', '0 / ' + n);
     try {
       await generateDemo(n);
-      log('生成 ' + n + ' 个演示局面');
+      log('生成 ' + n + ' 个演示局面（内置棋盘）');
+      toast('已生成 ' + n + ' 个演示局面');
     } catch (e) {
       toast('生成失败：' + e.message);
     }
+    setBusy(false);
     $('btnDemo').disabled = false;
+  });
+
+  // ------------------------------------------------ 按指定样本生成
+  //
+  // 「演示局面」用的是应用内置的棋盘图，和真实对局的皮肤、光照都不一样，
+  // 拿它训出来的模型迁移过去会掉点。这里改成以用户自己的一张图为模板：
+  //   1. 把模板里的棋子抹掉，得到一块干净的棋盘底（用空格子的图块覆盖）
+  //   2. 从模板里抠出每种棋子的图样（圆形羽化遮罩）
+  //   3. 在新画布上按抖动过的位置/缩放出棋盘，再随机摆子
+  // 这样生成出来的样本和用户实际看到的一致，训练数据才有意义。
+
+  var SPR = 96;   // 棋子图样的边长
+
+  /** 用空格子的图块盖住有子的格子，得到没有棋子的棋盘底 */
+  function makeCleanBoard(img, lat, cells) {
+    var dx = lat.dx, dy = lat.dy;
+    var bw = Math.round(dx * COLS), bh = Math.round(dy * ROWS);
+    var out = document.createElement('canvas');
+    out.width = bw; out.height = bh;
+    var c = out.getContext('2d');
+    c.drawImage(img,
+      lat.x0 - dx / 2, lat.y0 - dy / 2, dx * COLS, dy * ROWS,
+      0, 0, bw, bh);
+
+    // 收集空格子
+    var empties = [];
+    for (var r = 0; r < ROWS; r++) {
+      for (var col = 0; col < COLS; col++) {
+        if (!cells[r * COLS + col]) empties.push({ r: r, c: col });
+      }
+    }
+    if (!empties.length) return out;   // 全是子，没法清，原样返回
+
+    for (var r2 = 0; r2 < ROWS; r2++) {
+      for (var c2 = 0; c2 < COLS; c2++) {
+        if (!cells[r2 * COLS + c2]) continue;
+        // 找最近的空格子：同一行/列优先，格子线的走向才对得上
+        var best = empties[0], bestD = 1e9;
+        for (var k = 0; k < empties.length; k++) {
+          var d = Math.abs(empties[k].r - r2) + Math.abs(empties[k].c - c2);
+          if (d < bestD) { bestD = d; best = empties[k]; }
+        }
+        c.drawImage(out,
+          Math.round(best.c * dx), Math.round(best.r * dy), Math.round(dx), Math.round(dy),
+          Math.round(c2 * dx), Math.round(r2 * dy), Math.round(dx), Math.round(dy));
+      }
+    }
+    return out;
+  }
+
+  /** 从模板里抠出每种棋子的图样；模板里没有的类别用内置画法补上 */
+  function extractSprites(img, lat, cells) {
+    var sprites = new Array(NC).fill(null);
+    var side = Math.max(lat.dx, lat.dy);
+
+    for (var i = 0; i < CELLS; i++) {
+      var cls = cells[i];
+      if (!cls || sprites[cls]) continue;
+      var r = Math.floor(i / COLS), col = i % COLS;
+      var cx = lat.x0 + col * lat.dx;
+      var cy = lat.y0 + r * lat.dy;
+
+      var sc = document.createElement('canvas');
+      sc.width = SPR; sc.height = SPR;
+      var sctx2 = sc.getContext('2d');
+      // 圆形羽化遮罩：棋子本身接近正圆，羽化边缘让它压到新底上不留硬边
+      var g = sctx2.createRadialGradient(
+        SPR / 2, SPR / 2, SPR * 0.36,
+        SPR / 2, SPR / 2, SPR * 0.47
+      );
+      g.addColorStop(0, 'rgba(0,0,0,1)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      sctx2.beginPath();
+      sctx2.rect(0, 0, SPR, SPR);
+      sctx2.fillStyle = g;
+      sctx2.fill();
+      sctx2.globalCompositeOperation = 'source-in';
+      sctx2.drawImage(img,
+        cx - side / 2, cy - side / 2, side, side,
+        0, 0, SPR, SPR);
+      sctx2.globalCompositeOperation = 'source-over';
+      sprites[cls] = sc;
+    }
+
+    // 模板里没出现过的类别：用内置画法生成一个，保证任意类别都能摆
+    for (var k = 1; k < NC; k++) {
+      if (sprites[k]) continue;
+      var cv = document.createElement('canvas');
+      cv.width = SPR; cv.height = SPR;
+      drawPieceDemo(cv.getContext('2d'), SPR / 2, SPR / 2, SPR * 0.94, k);
+      sprites[k] = cv;
+    }
+    return sprites;
+  }
+
+  async function generateFromTemplate(s, n) {
+    if (!s || !s.lattice) throw new Error('这张图还没标定，先在标注页框选棋盘');
+    var img = await imageOf(s);
+
+    var lat = {
+      x0: s.lattice.x0 * s.w, y0: s.lattice.y0 * s.h,
+      dx: s.lattice.dx * s.w, dy: s.lattice.dy * s.h
+    };
+    var srcCells = s.cells && s.cells.some(function (v) { return v > 0; })
+      ? s.cells.slice()
+      : null;
+
+    var clean = null, sprites = null;
+    if (srcCells) {
+      clean = makeCleanBoard(img, lat, srcCells);
+      sprites = extractSprites(img, lat, srcCells);
+      log('已从模板提取：棋盘底 ' + clean.width + '×' + clean.height +
+          ' · 棋子图样 ' + sprites.filter(Boolean).length + ' 种');
+    }
+
+    // 取模板的界面底色，让生成的图看起来像同一个 App
+    var probe = document.createElement('canvas');
+    probe.width = s.w; probe.height = s.h;
+    var pc = probe.getContext('2d', { willReadFrequently: true });
+    pc.drawImage(img, 0, 0);
+    function px(x, y) {
+      var d = pc.getImageData(Math.max(0, Math.min(s.w - 1, x)),
+                              Math.max(0, Math.min(s.h - 1, y)), 1, 1).data;
+      return 'rgb(' + d[0] + ',' + d[1] + ',' + d[2] + ')';
+    }
+    var bgCol = px(8, 8), topCol = px(Math.round(s.w / 2), 30),
+        botCol = px(Math.round(s.w / 2), s.h - 30);
+
+    var baseCount = srcCells ? srcCells.filter(function (v) { return v > 0; }).length : 26;
+    var added = 0;
+
+    for (var k = 0; k < n; k++) {
+      var W = s.w, H = s.h;
+      // 抖动：位置和缩放在小范围内随机，模拟不同局面/窗口位置
+      var scale = 0.95 + Math.random() * 0.16;
+      var dx2 = lat.dx * scale, dy2 = lat.dy * scale;
+      var bw = dx2 * COLS, bh = dy2 * ROWS;
+      var ox = lat.x0 - dx2 / 2 + (Math.random() - 0.5) * 36;
+      var oy = lat.y0 - dy2 / 2 + (Math.random() - 0.5) * 36;
+
+      var cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      var c = cv.getContext('2d');
+      c.fillStyle = bgCol; c.fillRect(0, 0, W, H);
+      c.fillStyle = topCol; c.fillRect(0, 0, W, Math.max(1, oy - 6));
+      c.fillStyle = botCol; c.fillRect(0, Math.min(H, oy + bh + 6), W,
+                                       H - Math.min(H, oy + bh + 6));
+
+      if (clean) {
+        c.drawImage(clean, ox, oy, bw, bh);
+      } else {
+        // 模板没标注时退化成内置棋盘，至少比例是对的
+        if (!boardImg) boardImg = await loadImage('xiangqi.png');
+        c.drawImage(boardImg, ox, oy, bw, bh);
+      }
+
+      // 随机摆子
+      var cells = new Array(CELLS).fill(0);
+      var order = Array.from({ length: CELLS }, function (_, i) { return i; });
+      for (var i2 = order.length - 1; i2 > 0; i2--) {
+        var j = Math.floor(Math.random() * (i2 + 1));
+        var t = order[i2]; order[i2] = order[j]; order[j] = t;
+      }
+      var count = Math.max(4, Math.round(baseCount * (0.8 + Math.random() * 0.4)));
+      count = Math.min(count, CELLS - 1);
+      for (var m = 0; m < count; m++) {
+        var cell = order[m];
+        var rr = Math.floor(cell / COLS), cc = cell % COLS;
+        // 类别分布沿用模板：模板里出现过的类别更可能再出现
+        var cls = pickClass(srcCells);
+        cells[cell] = cls;
+        if (sprites) {
+          var sp = sprites[cls];
+          var side = Math.max(dx2, dy2) * 0.94;
+          c.drawImage(sp,
+            ox + cc * dx2 + dx2 / 2 - side / 2,
+            oy + rr * dy2 + dy2 / 2 - side / 2,
+            side, side);
+        } else {
+          drawPieceDemo(c, ox + cc * dx2 + dx2 / 2, oy + rr * dy2 + dy2 / 2, dx2 * 0.94, cls);
+        }
+      }
+
+      var blob = await canvasToBlob(cv, 'image/jpeg', 0.88);
+      var lat2 = {
+        x0: (ox + dx2 / 2) / W, dx: dx2 / W,
+        y0: (oy + dy2 / 2) / H, dy: dy2 / H
+      };
+
+      var rec = {
+        key: 'tpl-' + Date.now() + '-' + k + '-' + Math.random().toString(36).slice(2, 7),
+        name: '模板生成 ' + (k + 1),
+        w: W, h: H, thumb: makeThumb(cv, W, H, lat2), blob: blob,
+        lattice: lat2,
+        cells: cells, auto: null, conf: 99, src: s.name
+      };
+      await dbPut(rec);
+      samples.push(rec);
+      added++;
+      $('busySub').textContent = (k + 1) + ' / ' + n;
+      if (k % 3 === 2) await yieldTick();
+    }
+    return added;
+  }
+
+  /** 按模板里出现过的类别随机挑一个；模板没标注时红黑平均分 */
+  function pickClass(srcCells) {
+    if (srcCells) {
+      var pool = [];
+      for (var i = 0; i < CELLS; i++) if (srcCells[i]) pool.push(srcCells[i]);
+      if (pool.length) return pool[Math.floor(Math.random() * pool.length)];
+    }
+    var red = Math.random() < 0.5;
+    if (Math.random() < 0.3) return 15;   // 暗子
+    return red ? 1 + Math.floor(Math.random() * 7) : 8 + Math.floor(Math.random() * 7);
+  }
+
+  $('btnDemoFrom').addEventListener('click', async function () {
+    var s = currentSample();
+    if (!s) { toast('先在样本列表里点一张图'); return; }
+    if (!s.lattice) { toast('这张图还没标定 —— 先到「标注」页框选棋盘'); return; }
+
+    var n = clamp(parseInt($('demoCount').value, 10) || 30, 5, 300);
+    var btn = $('btnDemoFrom');
+    btn.disabled = true;
+    setBusy(true, '按模板生成', '0 / ' + n);
+    try {
+      var added = await generateFromTemplate(s, n);
+      renderSamples();
+      refreshTrainTab();
+      log('按模板「' + s.name + '」生成 ' + added + ' 张');
+      toast('已生成 ' + added + ' 张（模板：' + s.name + '）', 2600);
+    } catch (e) {
+      log('模板生成失败：' + e.message);
+      toast('生成失败：' + e.message);
+    }
+    setBusy(false);
+    btn.disabled = false;
   });
 
   // ---------------------------------------------------------------- 画布
@@ -495,6 +806,7 @@
         : (mode === 'nudge' ? '拖动整体平移，拖右下角缩放' : '点格子落子。放大后可拖动平移');
     }
     $('zoomLabel').textContent = fmt(view.zoom, 1) + '×';
+    renderLegend(s);
     updateProgress();
   }
 
@@ -552,27 +864,79 @@
     }
   }
 
+  /**
+   * 画标注标记。
+   *
+   * 颜色按阵营走：红子暖红、黑子冷白、暗子灰。
+   * 模型预标注出来的格子（s.auto[i] 为真且用户还没动过）画成虚线环，
+   * 提醒「这一格是模型猜的，还没人核对过」。
+   */
   function drawMarkers(s, S) {
     if (!s.lattice || !s.cells) return;
     var IW = view.imgW, IH = view.imgH;
     var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
     var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
-    var R = Math.min(dx, dy) * 0.22;
+    var R = Math.min(dx, dy) * 0.3;
+
     for (var r = 0; r < ROWS; r++) {
       for (var c = 0; c < COLS; c++) {
-        var v = s.cells[r * COLS + c];
+        var i = r * COLS + c;
+        var v = s.cells[i];
         if (!v) continue;
+        var auto = s.auto && s.auto[i];
+        var col = CLASSES[v].c;
         var cx = x0 + c * dx, cy = y0 + r * dy;
+
+        // 底：半透明填充，压住底下的棋子但仍看得见轮廓
         sctx.beginPath();
         sctx.arc(cx, cy, R, 0, Math.PI * 2);
-        sctx.fillStyle = 'rgba(53,196,106,.88)';
+        sctx.fillStyle = hexA(col, auto ? 0.22 : 0.3);
         sctx.fill();
-        sctx.fillStyle = '#0b0d10';
-        sctx.font = 'bold ' + Math.round(R * 1.3) + 'px "PingFang SC",serif';
+
+        // 环：模型猜的用虚线，人工确认的用实线
+        sctx.lineWidth = (auto ? 2 : 2.6) / S;
+        if (auto) sctx.setLineDash([3 / S, 2.5 / S]);
+        sctx.strokeStyle = col;
+        sctx.stroke();
+        sctx.setLineDash([]);
+
+        // 字
+        sctx.fillStyle = col;
+        sctx.font = 'bold ' + Math.round(R * 1.15) + 'px "PingFang SC",serif';
         sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
         sctx.fillText(CLASSES[v].g, cx, cy);
       }
     }
+  }
+
+  /** #rrggbb + alpha -> rgba() */
+  function hexA(hex, a) {
+    var h = hex.replace('#', '');
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    var n = parseInt(h, 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  /** 画布左上角的阵营图例 */
+  function renderLegend(s) {
+    var el = $('legend');
+    if (!el) return;
+    if (!s || !s.lattice) { el.innerHTML = ''; return; }
+    var counts = { r: 0, b: 0, d: 0, auto: 0 };
+    if (s.cells) {
+      for (var i = 0; i < CELLS; i++) {
+        var v = s.cells[i];
+        if (!v) continue;
+        counts[CLASSES[v].k]++;
+        if (s.auto && s.auto[i]) counts.auto++;
+      }
+    }
+    var parts = [];
+    if (counts.r) parts.push('<span class="lg"><i style="background:#e5555f"></i>红 ' + counts.r + '</span>');
+    if (counts.b) parts.push('<span class="lg"><i style="background:#cbd3dd"></i>黑 ' + counts.b + '</span>');
+    if (counts.d) parts.push('<span class="lg"><i style="background:#8b94a1"></i>暗 ' + counts.d + '</span>');
+    if (counts.auto) parts.push('<span class="lg"><i style="background:#e0a33a"></i>模型猜 ' + counts.auto + '</span>');
+    el.innerHTML = parts.join('');
   }
 
   /** 叠加显示模型预测：绿=与标注一致，红=不一致（包括「实际有子却预测成空」） */
@@ -640,8 +1004,123 @@
     s.lattice = { x0: r.x0 / s.w, y0: r.y0 / s.h, dx: r.dx / s.w, dy: r.dy / s.h };
     s.conf = r.confidence;
     if (!s.cells) s.cells = new Array(CELLS).fill(0);
+    refreshThumb(s);
     log('标定 ' + s.name + '：置信度 ' + fmt(r.confidence, 2) + '，' + fmt(performance.now() - t0, 0) + 'ms');
     return s.lattice;
+  }
+
+  /** 标定好了就把缩略图换成裁到棋盘的那版 */
+  function refreshThumb(s) {
+    var img = s.__img || stageImg;
+    if (!img || !s.lattice) return;
+    try {
+      s.thumb = makeThumb(img, s.w, s.h, s.lattice);
+    } catch (e) {
+      /* 缩略图是锦上添花，失败不影响标定 */
+    }
+  }
+
+  /** 取某张图的灰度（不只是当前这张），供批量标定用 */
+  function grayOf(s) {
+    if (!s) return null;
+    if (grayCache.key === s.key && grayCache.gray) return grayCache;
+
+    var cv = document.createElement('canvas');
+    cv.width = s.w; cv.height = s.h;
+    var c = cv.getContext('2d', { willReadFrequently: true });
+    // 同步画需要已解码的图；批量时用缓存过的
+    var img = s.__img;
+    if (!img) return null;
+    c.drawImage(img, 0, 0, s.w, s.h);
+    var d = c.getImageData(0, 0, s.w, s.h).data;
+    var g = new Uint8ClampedArray(s.w * s.h);
+    for (var i = 0, p = 0; i < g.length; i++, p += 4) {
+      g[i] = d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114;
+    }
+    grayCache = { key: s.key, gray: g, w: s.w, h: s.h };
+    return grayCache;
+  }
+
+  /**
+   * 不用框选，自动找棋盘。
+   * 批量标定走这条 —— 几十张图一张张拖框不现实。
+   */
+  async function calibrateAuto(s) {
+    await imageOf(s);                 // 确保已解码
+    var gc = grayOf(s);
+    if (!gc) return null;
+    var r = Lattice.fitBoardAuto(gc.gray, gc.w, gc.h);
+    if (!r || !r.ok) return null;
+    s.lattice = { x0: r.x0 / s.w, y0: r.y0 / s.h, dx: r.dx / s.w, dy: r.dy / s.h };
+    s.conf = r.confidence;
+    s.edgeRatio = r.edgeRatio;
+    if (!s.cells) s.cells = new Array(CELLS).fill(0);
+    refreshThumb(s);
+    return s.lattice;
+  }
+
+  $('btnBatchCalib').addEventListener('click', async function () {
+    var targets = samples.filter(function (s) { return !s.lattice; });
+    if (!targets.length) { toast('所有图都已经标定过了'); return; }
+
+    var btn = $('btnBatchCalib');
+    btn.disabled = true;
+    setBusy(true, '批量标定', '0 / ' + targets.length);
+    if (native()) native().keepAwake(true);
+
+    var ok = 0, fail = 0;
+    try {
+      for (var i = 0; i < targets.length; i++) {
+        try {
+          var lat = await calibrateAuto(targets[i]);
+          if (lat) { ok++; await dbPut(toRecord(targets[i])); }
+          else fail++;
+        } catch (e) {
+          fail++;
+          log('标定失败 ' + targets[i].name + '：' + e.message);
+        }
+        $('busySub').textContent = (i + 1) + ' / ' + targets.length;
+        if (i % 3 === 2) await yieldTick();
+      }
+    } catch (e) {
+      log('批量标定中断：' + e.message);
+    }
+
+    if (native()) native().keepAwake(false);
+    setBusy(false);
+    btn.disabled = false;
+    renderSamples();
+    updateBatchInfo();
+    refreshTrainTab();
+    log('批量标定：成功 ' + ok + ' 张，失败 ' + fail + ' 张');
+    toast('标定完成：成功 ' + ok + (fail ? '，失败 ' + fail + '（可逐张手动框选）' : ''), 2800);
+  });
+
+  /** 样本页那张卡片上的统计 */
+  function updateBatchInfo() {
+    var el = $('batchInfo');
+    if (!el) return;
+    if (!samples.length) {
+      $('batchCard').hidden = true;
+      return;
+    }
+    $('batchCard').hidden = false;
+    var calib = 0, labeled = 0, pending = 0;
+    samples.forEach(function (s) {
+      if (s.lattice) calib++;
+      if (s.cells) {
+        for (var i = 0; i < CELLS; i++) {
+          if (s.cells[i] > 0) labeled++;
+          if (s.auto && s.auto[i]) pending++;
+        }
+      }
+    });
+    var uncalib = samples.length - calib;
+    el.innerHTML = '已标定 <b>' + calib + '</b> / ' + samples.length +
+      (uncalib ? ' · <span style="color:#e0a33a">待标定 ' + uncalib + '</span>' : '') +
+      ' · 已落子 ' + labeled + ' 格' +
+      (pending ? ' · <span style="color:#e0a33a">其中 ' + pending + ' 格是模型猜的，还没核对</span>' : '');
+    $('btnBatchCalib').disabled = !uncalib;
   }
 
   // ---------------------------------------------------------------- 互动
@@ -671,6 +1150,8 @@
     if (idx < 0) return -1;
     s.cells = s.cells || new Array(CELLS).fill(0);
     s.cells[idx] = (s.cells[idx] === brush) ? 0 : brush;   // 同笔刷再点 = 擦掉
+    // 人手点过这一格，就不再是「模型猜的」，虚线环随之变成实线
+    if (s.auto) s.auto[idx] = 0;
     lastCell = idx;
     queueSave(s);
     renderStage();
@@ -841,16 +1322,24 @@
   function toRecord(s) {
     return {
       key: s.key, name: s.name, w: s.w, h: s.h, thumb: s.thumb, blob: s.blob,
-      lattice: s.lattice, cells: s.cells, conf: s.conf
+      lattice: s.lattice, cells: s.cells, conf: s.conf, auto: s.auto, src: s.src
     };
   }
 
   function updateProgress() {
     var s = currentSample();
     if (!s) return;
-    var painted = 0;
-    if (s.cells) for (var i = 0; i < CELLS; i++) if (s.cells[i] > 0) painted++;
-    $('cellProgress').textContent = '已标注 ' + painted + ' / 90';
+    var painted = 0, pending = 0;
+    if (s.cells) {
+      for (var i = 0; i < CELLS; i++) {
+        if (s.cells[i] > 0) painted++;
+        if (s.auto && s.auto[i]) pending++;
+      }
+    }
+    var text = '已标注 ' + painted + ' / 90';
+    $('cellProgress').innerHTML = text + (pending
+      ? ' · <span style="color:#e0a33a">待核对 ' + pending + '</span>'
+      : '');
     renderPaletteCounts();
   }
 
@@ -1012,7 +1501,12 @@
   }
 
   // ---------------------------------------------------------------- 数据集
-  var master = null, masterLabels = null, valLabelsArr = null;
+  // 训练数据。之前存的是 Uint8 + 标签号，每个 batch 都要在 JS 里
+  // 逐元素除 255、再做一次 oneHot —— 一轮下来几千万次 JS 运算，
+  // 全压在主线程上。改成建库时归一化一次、one-hot 也预先做好，
+  // 训练时每个 batch 只需要几段 memcpy。
+  var trainX = null, trainY = null;
+  var valX = null, valY = null, valLabelsArr = null;
   var valKeys = {};      // 上一轮训练用到的验证图，回测时用来分开统计
 
   function usable() {
@@ -1036,7 +1530,7 @@
       '可用图片 <b>' + u.length + '</b> 张 · 共 <b>' + total + '</b> 格，其中非空 <b>' + nonEmpty +
       '</b> 格（' + fmt(nonEmpty / total * 100, 1) + '%）';
     $('btnBuild').disabled = false;
-    $('btnTrain').disabled = !master;
+    $('btnTrain').disabled = !trainX;
   }
 
   async function buildDataset() {
@@ -1081,23 +1575,31 @@
       if (n % 5 === 4) await new Promise(function (r) { setTimeout(r, 0); });
     }
 
-    if (master) { master = null; masterLabels = null; }
-    master = new Uint8Array(trSlices.length * px);
-    masterLabels = new Int32Array(trSlices.length);
-    for (var q = 0; q < trSlices.length; q++) {
-      master.set(trSlices[q], q * px);
-      masterLabels[q] = trLab[q];
+    var nTrain = trSlices.length, nVal = vaSlices.length;
+    trainX = new Float32Array(nTrain * px);
+    trainY = new Float32Array(nTrain * NC);
+    for (var q = 0; q < nTrain; q++) {
+      var srcQ = trSlices[q], dstQ = q * px;
+      for (var j = 0; j < px; j++) trainX[dstQ + j] = srcQ[j] / 255;
+      trainY[q * NC + trLab[q]] = 1;
     }
+    var vaSlices0 = vaSlices;
+    // 切片缓冲用完就放掉，省一半内存
+    trSlices = null; vaSlices = null;
 
-    var vMaster = new Uint8Array(vaSlices.length * px);
-    for (var q2 = 0; q2 < vaSlices.length; q2++) vMaster.set(vaSlices[q2], q2 * px);
+    valX = new Float32Array(nVal * px);
+    valY = new Float32Array(nVal * NC);
+    for (var q2 = 0; q2 < nVal; q2++) {
+      var srcV = vaSlices0[q2], dstV = q2 * px;
+      for (var j2 = 0; j2 < px; j2++) valX[dstV + j2] = srcV[j2] / 255;
+      valY[q2 * NC + vaLab[q2]] = 1;
+    }
     valLabelsArr = new Int32Array(vaLab);
-    window.__vMaster = vMaster;
 
-    var mb = (master.length + vMaster.length) / 1048576;
-    log('训练切片 ' + trSlices.length + ' · 验证切片 ' + vaSlices.length + ' · 共 ' + fmt(mb, 1) + ' MB');
-    $('dataSummary').innerHTML += '<br>训练切片 <b>' + trSlices.length + '</b> · 验证切片 <b>' +
-      vaSlices.length + '</b> · ' + fmt(mb, 1) + ' MB';
+    var mb = (trainX.byteLength + valX.byteLength) / 1048576;
+    log('训练切片 ' + nTrain + ' · 验证切片 ' + nVal + ' · 共 ' + fmt(mb, 1) + ' MB');
+    $('dataSummary').innerHTML += '<br>训练切片 <b>' + nTrain + '</b> · 验证切片 <b>' +
+      nVal + '</b> · ' + fmt(mb, 1) + ' MB';
 
     $('btnBuild').disabled = false;
     $('btnBuild').textContent = '构建数据集';
@@ -1111,6 +1613,40 @@
     $('pSize').value = inSize;
     buildDataset().then(function () { toast('数据集就绪'); })
       .catch(function (e) { log('构建失败 ' + e.message); toast('构建失败'); });
+  });
+
+  /**
+   * 按数据量给一组能直接用的参数。
+   * 新手最常卡在「轮数/批大小填多少」，其实和数据量强相关。
+   */
+  $('btnRecommend').addEventListener('click', function () {
+    var u = usable();
+    var imgs = u.length;
+    var cells = imgs * CELLS;
+    var size = 32, epochs = 40, batch = 64, empty = 30, val = 20, patience = 10;
+    var note = '';
+
+    if (imgs < 30) {
+      size = 24; epochs = 80; batch = 32; empty = 40; val = 25; patience = 20;
+      note = '图还很少（' + imgs + ' 张）—— 用更小的输入尺寸、更多的轮数，' +
+             '保留更多空格子，免得模型只会猜「空」。建议再补几组图。';
+    } else if (imgs < 120) {
+      size = 32; epochs = 60; batch = 64; empty = 35; val = 20; patience = 15;
+      note = '中等数据量（' + imgs + ' 张）—— 32×32 输入、60 轮是个稳的选择。';
+    } else {
+      size = 32; epochs = 40; batch = 128; empty = 30; val = 15; patience = 10;
+      note = '数据比较充足（' + imgs + ' 张）—— 可以用更大的批大小，轮数反而不必多。';
+    }
+
+    $('pSize').value = size;
+    $('pEpochs').value = epochs;
+    $('pBatch').value = batch;
+    $('pEmpty').value = empty;
+    $('pVal').value = val;
+    $('pPatience').value = patience;
+    log('推荐参数：输入 ' + size + ' · 轮数 ' + epochs + ' · 批 ' + batch +
+        ' · 保留空格 ' + empty + '% · 早停 ' + patience);
+    toast(note, 4200);
   });
 
   $('btnPreviewCells').addEventListener('click', function () {
@@ -1162,30 +1698,64 @@
     return m;
   }
 
-  function makeBatch(idx, size) {
+  /**
+   * 取一个 batch。
+   *
+   * 数据已经归一化并做成 one-hot，这里只做定点搬运：
+   * 每行一次 TypedArray.set（memcpy），不再有逐元素的 JS 循环。
+   * 这是训练提速的主要来源。
+   */
+  function makeBatch(order, from, to, size) {
     var px = size * size * 3;
-    var xsArr = new Float32Array(idx.length * px);
-    var ysArr = new Int32Array(idx.length);
-    for (var i = 0; i < idx.length; i++) {
-      var src = idx[i] * px;
-      var dst = i * px;
-      for (var j = 0; j < px; j++) xsArr[dst + j] = master[src + j] / 255;
-      ysArr[i] = masterLabels[idx[i]];
+    var count = to - from;
+    var xsArr = new Float32Array(count * px);
+    var ysArr = new Float32Array(count * NC);
+    for (var i = 0; i < count; i++) {
+      var src = order[from + i];
+      xsArr.set(trainX.subarray(src * px, src * px + px), i * px);
+      ysArr.set(trainY.subarray(src * NC, src * NC + NC), i * NC);
     }
     return {
-      xs: tf.tensor4d(xsArr, [idx.length, size, size, 3]),
-      ys: tf.oneHot(tf.tensor1d(ysArr, 'int32'), NC)
+      xs: tf.tensor4d(xsArr, [count, size, size, 3]),
+      ys: tf.tensor2d(ysArr, [count, NC])
     };
   }
 
-  function shuffledIdx() {
-    var a = new Int32Array(masterLabels.length);
-    for (var i = 0; i < a.length; i++) a[i] = i;
-    for (var j = a.length - 1; j > 0; j--) {
+  /** 打乱索引。复用同一个缓冲，省掉每轮一次分配 */
+  var orderBuf = null;
+  function shuffledOrder() {
+    var n = trainY.length / NC;
+    if (!orderBuf || orderBuf.length !== n) {
+      orderBuf = new Int32Array(n);
+    }
+    var a = orderBuf;
+    for (var i = 0; i < n; i++) a[i] = i;
+    for (var j = n - 1; j > 0; j--) {
       var k = Math.floor(Math.random() * (j + 1));
       var t = a[j]; a[j] = a[k]; a[k] = t;
     }
     return a;
+  }
+
+  /** 快速验证集准确率，供每轮显示进度用（分块跑，避免一次占满显存） */
+  async function quickValAcc() {
+    var n = valLabelsArr ? valLabelsArr.length : 0;
+    if (!n) return 0;
+    var px = inSize * inSize * 3;
+    var CH = 256;
+    var correct = 0;
+    for (var b = 0; b < n; b += CH) {
+      var end = Math.min(n, b + CH);
+      var arr = valX.subarray(b * px, end * px);
+      var t = tf.tidy(function () {
+        var xs = tf.tensor4d(arr, [end - b, inSize, inSize, 3]);
+        return tf.argMax(model.apply(xs, { training: false }), -1);
+      });
+      var d = t.dataSync();
+      t.dispose();
+      for (var i = 0; i < d.length; i++) if (d[i] === valLabelsArr[b + i]) correct++;
+    }
+    return correct / n;
   }
 
   // ------------------------------------------------ 用训练好的模型跑单张图
@@ -1228,6 +1798,121 @@
   var backtest = {};
   var showPred = false;    // 标注画布是否叠加显示模型预测
   var lastPred = null;     // 当前图的预测
+
+  // ------------------------------------------------ 忙碌遮罩
+  // 批量操作动辄几十秒，没有反馈的话用户会以为卡死了。
+
+  var busyDepth = 0;
+  function setBusy(on, text, sub) {
+    var el = $('busy');
+    if (!el) return;
+    if (on) {
+      busyDepth++;
+      if (text) $('busyText').textContent = text;
+      $('busySub').textContent = sub || '';
+      el.hidden = false;
+    } else {
+      busyDepth = Math.max(0, busyDepth - 1);
+      if (busyDepth === 0) el.hidden = true;
+    }
+  }
+
+  // ------------------------------------------------ 模型辅助标注
+  //
+  // 先让模型把 90 个格子全猜一遍，人只负责核对改错。
+  // 比从零开始点 90 格快得多 —— 模型对了就不用动，只改错的。
+  //
+  // 写进去的格子会打上 auto 标记（画布上显示为虚线环），
+  // 人一旦点过就转成实线，于是「还有哪些没核对」一目了然。
+
+  function hasManualMarks(s) {
+    if (!s.cells) return false;
+    for (var i = 0; i < CELLS; i++) {
+      if (s.cells[i] > 0 && !(s.auto && s.auto[i])) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 给一张图做预标注。
+   * 已经有人工标注时只补空格子，不覆盖人手点过的。
+   * @returns 实际写入的格数，失败返回 -1
+   */
+  async function preLabelOne(s) {
+    if (!s || !s.lattice) return -1;
+    var pred = await predictCells(s, inSize);
+    if (!pred) return -1;
+
+    var keepManual = hasManualMarks(s);
+    s.cells = s.cells || new Array(CELLS).fill(0);
+    s.auto = s.auto || new Array(CELLS).fill(0);
+
+    var wrote = 0;
+    for (var i = 0; i < CELLS; i++) {
+      if (keepManual && s.cells[i] > 0) continue;   // 人手标的优先
+      var v = pred[i];
+      s.cells[i] = v;
+      // 预测成空的格子不用留痕 —— 画布上本来就画不出东西
+      s.auto[i] = v > 0 ? 1 : 0;
+      if (v > 0) wrote++;
+    }
+    return wrote;
+  }
+
+  $('btnPreLabel').addEventListener('click', async function () {
+    var s = currentSample();
+    if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
+    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+
+    var btn = $('btnPreLabel');
+    btn.disabled = true; btn.textContent = '推理中…';
+    try {
+      var n = await preLabelOne(s);
+      if (n < 0) { toast('推理失败'); return; }
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      toast('模型标了 ' + n + ' 个非空格子（虚线环 = 还没核对）', 2600);
+    } catch (e) {
+      log('预标注失败 ' + e.message);
+      toast('预标注失败：' + e.message);
+    }
+    btn.disabled = false; btn.textContent = '模型预标注';
+  });
+
+  /** 批量预标注：只处理已标定、且还没怎么人工标注过的图 */
+  async function preLabelAll() {
+    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+    var targets = samples.filter(function (s) { return s.lattice; });
+    if (!targets.length) { toast('还没有已标定的图，先点「批量标定」'); return; }
+
+    setBusy(true, '模型预标注', '0 / ' + targets.length);
+    if (native()) native().keepAwake(true);
+    var done = 0, skipped = 0, cells = 0;
+    try {
+      for (var i = 0; i < targets.length; i++) {
+        var s = targets[i];
+        if (hasManualMarks(s)) { skipped++; continue; }
+        var n = await preLabelOne(s);
+        if (n >= 0) { cells += n; await dbPut(toRecord(s)); }
+        done++;
+        $('busySub').textContent = (i + 1) + ' / ' + targets.length;
+        if (i % 3 === 2) await yieldTick();
+      }
+    } catch (e) {
+      log('批量预标注中断：' + e.message);
+    }
+    if (native()) native().keepAwake(false);
+    setBusy(false);
+    renderSamples();
+    refreshTrainTab();
+    if (current >= 0) renderStage();
+    log('批量预标注完成：处理 ' + done + ' 张，跳过已人工标注的 ' + skipped +
+        ' 张，共写入 ' + cells + ' 个非空格子');
+    toast('预标注完成：' + done + ' 张' + (skipped ? '，跳过 ' + skipped + ' 张已人工标注的' : ''), 2800);
+  }
+
+  $('btnPreLabelAll').addEventListener('click', function () { preLabelAll(); });
 
   // ------------------------------------------------ 模型持久化
   // 不存下来的话，关掉应用模型就没了，等于没法「训练完隔天再测」。
@@ -1345,28 +2030,24 @@
   }
 
   async function evaluate() {
-    var vM = window.__vMaster;
     var size = inSize, px = size * size * 3;
-    var n = valLabelsArr.length;
+    var n = valLabelsArr ? valLabelsArr.length : 0;
     if (!n) return null;
     var preds = new Int32Array(n);
-    var CH = 128;
+    var CH = 256;
     for (var b = 0; b < n; b += CH) {
       var end = Math.min(n, b + CH);
-      var arr = new Float32Array((end - b) * px);
-      for (var i = b; i < end; i++) {
-        var src = i * px, dst = (i - b) * px;
-        for (var j = 0; j < px; j++) arr[dst + j] = vM[src + j] / 255;
-      }
+      // 数据已经归一化过，直接切片即可，不用再拷一遍
+      var arr = valX.subarray(b * px, end * px);
       var t = tf.tidy(function () {
         var xs = tf.tensor4d(arr, [end - b, size, size, 3]);
         var logits = model.apply(xs, { training: false });
         return tf.argMax(logits, -1);
       });
-      var d = await t.data();
+      var d = t.dataSync();
       t.dispose();
       for (var k = 0; k < d.length; k++) preds[b + k] = d[k];
-      await new Promise(function (r) { setTimeout(r, 0); });
+      await yieldTick();
     }
 
     var conf = [];
@@ -1386,12 +2067,13 @@
   }
 
   /** 训练 loss 曲线：一眼看出是否还在下降（欠拟合）或已经平了（该加数据了） */
-  function drawLossCurve(hist) {
+  /** 训练曲线：同时画 loss（左轴）和验证准确率（右轴） */
+  function drawLossCurve(hist, valHist) {
     var cv = $('lossCurve');
     if (!hist || hist.length < 2) { cv.hidden = true; return; }
     cv.hidden = false;
 
-    var w = Math.max(200, cv.clientWidth || 320), h = 120;
+    var w = Math.max(200, cv.clientWidth || 320), h = 130;
     var dpr = window.devicePixelRatio || 1;
     cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
     cv.style.height = h + 'px';
@@ -1414,12 +2096,35 @@
     hist.forEach(function (v, i) { i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)); });
     c.stroke();
 
+    // 验证准确率叠加在同一张图上（0~100% 映射到整个高度）。
+    // 只看 loss 会误判 —— loss 降了不代表真的会认棋子。
+    if (valHist && valHist.length === hist.length) {
+      c.beginPath(); c.strokeStyle = '#3fbf74'; c.lineWidth = 2;
+      c.setLineDash([4, 3]);
+      valHist.forEach(function (v, i) {
+        var yy = padT + (h - padT - padB) * (1 - v);
+        i ? c.lineTo(X(i), yy) : c.moveTo(X(i), yy);
+      });
+      c.stroke();
+      c.setLineDash([]);
+    }
+
     c.fillStyle = '#98a0ac'; c.font = '9px ui-monospace,monospace';
     c.textAlign = 'right'; c.textBaseline = 'middle';
     c.fillText(hi.toFixed(2), padL - 4, padT);
     c.fillText(lo.toFixed(2), padL - 4, h - padB);
+    c.textAlign = 'right'; c.textBaseline = 'top';
+    c.fillStyle = '#ffb020';
+    c.fillText('100%', w - padR - 2, padT - 1);
+    c.fillText('0%', w - padR - 2, h - padB - 10);
     c.textAlign = 'left'; c.textBaseline = 'top';
-    c.fillText('训练 loss', padL + 3, 1);
+    c.fillStyle = '#4c8dff';
+    c.fillText('— loss', padL + 3, 1);
+    if (valHist && valHist.length === hist.length) {
+      c.fillStyle = '#3fbf74';
+      c.fillText('-- 验证准确率', padL + 48, 1);
+    }
+    c.fillStyle = '#98a0ac';
     c.textAlign = 'right';
     c.fillText(hist.length + ' 轮', w - padR, h - padB + 4);
   }
@@ -1590,7 +2295,7 @@
   });
 
   $('btnTrain').addEventListener('click', async function () {
-    if (!master) { toast('先构建数据集'); return; }
+    if (!trainX) { toast('先构建数据集'); return; }
     var epochs = clamp(parseInt($('pEpochs').value, 10) || 40, 1, 400);
     var batch = clamp(parseInt($('pBatch').value, 10) || 64, 8, 512);
     var size = inSize;
@@ -1617,15 +2322,20 @@
     var t0 = performance.now();
     var firstEpoch = 0, lastEpoch = 0;
     var lossHist = [];
+    var valHist = [];
+    var patience = clamp(parseInt($('pPatience').value, 10) || 0, 0, 200);
+    var bestVal = -1, bestEp = -1, stale = 0;
+    var nTrainSamples = trainY.length / NC;
+    var stoppedEarly = false;
 
     for (var ep = 0; ep < epochs && !stopFlag; ep++) {
-      var idx = shuffledIdx();
+      var order = shuffledOrder();
       var epStart = performance.now();
       var lossSum = 0, batches = 0;
 
-      for (var b = 0; b < idx.length; b += batch) {
-        var slice = Array.prototype.slice.call(idx.subarray(b, Math.min(idx.length, b + batch)));
-        var bt = makeBatch(slice, size);
+      for (var b = 0; b < nTrainSamples; b += batch) {
+        var to = Math.min(nTrainSamples, b + batch);
+        var bt = makeBatch(order, b, to, size);
         var lossVal = opt.minimize(function () {
           var logits = model.apply(bt.xs, { training: true });
           return tf.losses.softmaxCrossEntropy(bt.ys, logits).mean();
@@ -1640,20 +2350,55 @@
       var epMs = performance.now() - epStart;
       if (ep === 0) firstEpoch = epMs;
       lastEpoch = epMs;
-      lossHist.push(lossSum / Math.max(1, batches));
+      var epLoss = lossSum / Math.max(1, batches);
+      lossHist.push(epLoss);
+
+      // 每轮跑一遍验证集：只看 loss 是看不出「到底会不会认棋子」的。
+      // 验证集不大，前向一遍的开销相对反传可以忽略。
+      var valAcc = 0;
+      try { valAcc = await quickValAcc(); } catch (e) { valAcc = 0; }
+      valHist.push(valAcc);
+
+      if (valAcc > bestVal) { bestVal = valAcc; bestEp = ep; stale = 0; }
+      else stale++;
+
+      var elapsed = (performance.now() - t0) / 1000;
+      var steady = ep > 0 ? (elapsed - firstEpoch / 1000) / ep : 0;
+      var remain = steady > 0 ? Math.max(0, (epochs - ep - 1) * steady) : 0;
+      var thru = epMs > 0 ? Math.round(nTrainSamples / (epMs / 1000)) : 0;
 
       $('trainProg').style.width = ((ep + 1) / epochs * 100) + '%';
-      $('trainStat').innerHTML = '第 ' + (ep + 1) + '/' + epochs + ' 轮 · loss <b>' +
-        fmt(lossSum / Math.max(1, batches), 4) + '</b> · 本轮 ' + fmt(epMs / 1000, 1) +
-        's<br><span class="muted">首轮（含编译）' + fmt(firstEpoch / 1000, 1) + 's</span>';
+      $('trainStat').innerHTML =
+        '第 ' + (ep + 1) + '/' + epochs + ' 轮 · loss <b>' + fmt(epLoss, 4) +
+        '</b> · 验证 <b>' + fmt(valAcc * 100, 1) + '%</b>' +
+        '<br><span class="muted">本轮 ' + fmt(epMs / 1000, 1) + 's · ' + thru +
+        ' 样本/秒 · 已用 ' + fmt(elapsed, 0) + 's</span>';
+      $('etaText').textContent = remain > 0
+        ? '预计还需 ' + (remain >= 60 ? fmt(remain / 60, 1) + ' 分钟' : fmt(remain, 0) + ' 秒') +
+          '（首轮含编译 ' + fmt(firstEpoch / 1000, 1) + 's）'
+        : '';
+
       if (ep % 2 === 1 || ep === epochs - 1) await yieldTick();
-      if (ep % 5 === 0) log('第 ' + (ep + 1) + ' 轮 loss ' + fmt(lossSum / Math.max(1, batches), 4));
+      if (ep % 5 === 0) {
+        log('第 ' + (ep + 1) + ' 轮 loss ' + fmt(epLoss, 4) + ' · 验证 ' + fmt(valAcc * 100, 1) + '%');
+      }
+
+      // 早停：验证准确率连续若干轮不再提升就收手，省掉后面白跑的轮数
+      if (patience > 0 && stale >= patience) {
+        stoppedEarly = true;
+        log('早停：验证准确率已连续 ' + patience + ' 轮没有提升（最好 ' +
+            fmt(bestVal * 100, 1) + '% @ 第 ' + (bestEp + 1) + ' 轮）');
+        break;
+      }
     }
 
     var total = (performance.now() - t0) / 1000;
-    $('trainStat').innerHTML += '<br><span class="muted">训练结束，共 ' + fmt(total, 0) + 's</span>';
-    drawLossCurve(lossHist);
-    log('训练结束，用时 ' + fmt(total, 1) + 's');
+    $('etaText').textContent = '';
+    $('trainStat').innerHTML += '<br><span class="muted">训练结束，共 ' + fmt(total, 0) +
+      's' + (stoppedEarly ? ' · 早停' : '') + ' · 最好验证 ' + fmt(bestVal * 100, 1) + '%</span>';
+    drawLossCurve(lossHist, valHist);
+    log('训练结束，用时 ' + fmt(total, 1) + 's · 最好验证 ' + fmt(bestVal * 100, 2) +
+        '%（第 ' + (bestEp + 1) + ' 轮）');
 
     try {
       log('在验证集上评估…');
@@ -1840,6 +2585,24 @@
       };
     },
     hit: function (lx, ly) { return cellAt(toImage({ x: lx, y: ly })); },
+    /** 清掉当前图的标定，用来测批量标定（仅供自动化测试） */
+    dropLattice: function () {
+      var s = currentSample();
+      if (!s) return false;
+      s.lattice = null; s.conf = 0;
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      return true;
+    },
+    /** 标注数据，供自动化核对用 */
+    cells: function () {
+      var s = currentSample();
+      return s ? {
+        cells: s.cells ? Array.from(s.cells) : null,
+        auto: s.auto ? Array.from(s.auto) : null
+      } : null;
+    },
     findKey: function (key) {
       for (var k = 0; k < samples.length; k++) if (samples[k].key === key) return k;
       return -1;

@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=13">
+<link rel="stylesheet" href="studio.css?v=20">
 </head>
 <body>
 
 <header class="topbar">
-  <div class="brand">模型工坊</div>
+  <div class="brand">模型工坊 <em>采集 · 标注 · 训练</em></div>
   <nav class="tabs">
     <button data-tab="samples" class="on">样本</button>
     <button data-tab="annotate">标注</button>
@@ -23,6 +23,7 @@
 <!-- ========== 样本 ========== -->
 <section id="tab-samples" class="tab on">
   <div class="card">
+    <h2>导入</h2>
     <div class="row">
       <button id="btnImport" class="primary">导入截图</button>
       <button id="btnDemo">生成演示局面</button>
@@ -31,12 +32,29 @@
     <input id="fileInput" type="file" accept="image/*" multiple hidden>
     <div id="sampleSummary" class="muted mt8">还没有样本。导入对局截图，或先点「生成演示局面」验证整条链路。</div>
   </div>
+
+  <div class="card" id="batchCard" hidden>
+    <h2>批量处理</h2>
+    <div class="muted tiny mb6">导入之后，先把所有图一次性标定好，再逐张核对会快很多。</div>
+    <div class="row">
+      <button id="btnBatchCalib" class="primary">批量标定未标定的图</button>
+      <button id="btnDemoFrom">以当前图为模板生成</button>
+    </div>
+    <div class="row mt8">
+      <label class="muted tiny">生成数量 <input type="number" id="demoCount" value="30" min="5" max="300" step="5"></label>
+    </div>
+    <div id="batchInfo" class="muted tiny mt8"></div>
+  </div>
+
   <div id="sampleGrid" class="grid"></div>
 </section>
 
 <!-- ========== 标注 ========== -->
 <section id="tab-annotate" class="tab">
-  <div id="annotateEmpty" class="card muted">先在「样本」里导入截图。</div>
+  <div id="annotateEmpty" class="card empty">
+    <div class="ic">◲</div>
+    <p>先在「样本」里导入截图。<br>标注前要在棋盘外沿拖一个框，程序会自动把格线拟合到亚像素。</p>
+  </div>
 
   <div id="annotateBody" hidden>
     <div class="card tight">
@@ -52,24 +70,30 @@
 
     <div class="stagewrap">
       <canvas id="stage"></canvas>
+      <div id="legend" class="legend"></div>
       <div id="stageHint" class="stagehint"></div>
     </div>
 
     <div class="card tight">
-      <div class="row">
+      <!-- 三种操作各占一格，不换行 -->
+      <div class="btnrow">
         <button id="btnCalib" class="primary">框选棋盘</button>
         <button id="btnAuto">自动校正</button>
         <button id="btnNudge">微调</button>
-        <button id="btnCopyPrev">复制上局</button>
-        <button id="btnCheckModel">用模型检查</button>
-        <button id="btnClearCells" class="danger-ghost">清空格子</button>
       </div>
-      <div class="row mt8">
-        <button id="btnZoomOut">－</button>
-        <span id="zoomLabel" class="tiny muted" style="min-width:38px;text-align:center">1.0×</span>
-        <button id="btnZoomIn">＋</button>
-        <button id="btnZoomFit">适应</button>
-        <span class="muted tiny" style="margin-left:auto">双指捏合也可缩放</span>
+      <!-- 缩放单独一行，紧凑右对齐 -->
+      <div class="btnrow mt8 slim">
+        <span class="muted tiny">缩放</span>
+        <button id="btnZoomOut" class="sm">－</button>
+        <span id="zoomLabel" class="tiny muted" style="min-width:34px;text-align:center">1.0×</span>
+        <button id="btnZoomIn" class="sm">＋</button>
+        <button id="btnZoomFit" class="sm ghost">适应</button>
+      </div>
+      <div class="btnrow mt8">
+        <button id="btnPreLabel" class="primary">模型预标注</button>
+        <button id="btnCopyPrev" class="sm">复制上局</button>
+        <button id="btnCheckModel" class="sm">对比模型</button>
+        <button id="btnClearCells" class="sm danger-ghost">清空</button>
       </div>
     </div>
 
@@ -79,6 +103,9 @@
         <span id="cellProgress" class="tiny">已标注 0 / 90</span>
       </div>
       <div id="palette" class="palette"></div>
+      <div class="muted tiny mt8">
+        点格子落子 · 同笔刷再点一次擦除 · 双指捏合缩放 · 放大后单指拖动平移
+      </div>
     </div>
   </div>
 </section>
@@ -90,19 +117,21 @@
     <div id="dataSummary" class="muted">还没有已标注的样本。</div>
     <div class="row mt8">
       <button id="btnBuild" class="primary">构建数据集</button>
-      <button id="btnPreviewCells" disabled>看切片</button>
+      <button id="btnPreLabelAll" class="ghost">批量预标注</button>
+      <button id="btnPreviewCells" class="ghost" disabled>看切片</button>
     </div>
     <canvas id="cellPreview" class="mt8" hidden></canvas>
   </div>
 
   <div class="card">
-    <h2>参数</h2>
+    <h2>参数 <button id="btnRecommend" class="sm ghost" style="margin-left:auto">按数据量推荐</button></h2>
     <div class="params">
       <label>输入尺寸 <input type="number" id="pSize" value="32" min="16" max="64" step="4"></label>
       <label>轮数 <input type="number" id="pEpochs" value="40" min="1" max="400"></label>
       <label>批大小 <input type="number" id="pBatch" value="64" min="8" max="512" step="8"></label>
       <label>保留空格 <input type="number" id="pEmpty" value="30" min="0" max="100" step="5"></label>
       <label>验证图片 <input type="number" id="pVal" value="20" min="10" max="40" step="5"></label>
+      <label>早停耐心 <input type="number" id="pPatience" value="10" min="0" max="100"></label>
     </div>
     <div class="row mt8">
       <button id="btnTrain" class="primary" disabled>开始训练</button>
@@ -110,12 +139,13 @@
     </div>
     <div class="bar mt8"><i id="trainProg"></i></div>
     <div id="trainStat" class="muted tiny mt6">—</div>
+    <div id="etaText" class="muted tiny"></div>
   </div>
 
   <div class="card" id="resultCard" hidden>
     <h2>结果</h2>
     <div id="evalStat"></div>
-    <canvas id="lossCurve" height="120" hidden></canvas>
+    <canvas id="lossCurve" hidden></canvas>
     <div class="row mt8">
       <button id="btnSaveModel" class="primary">保存模型</button>
       <button id="btnExportOnnx">导出 ONNX</button>
@@ -140,7 +170,7 @@
 <section id="tab-models" class="tab">
   <div class="card">
     <h2>已保存的模型</h2>
-    <div id="modelList" class="muted">还没有保存过模型。</div>
+    <div id="modelList" class="muted">还没有模型。</div>
   </div>
   <div class="card">
     <h2>关于</h2>
@@ -152,9 +182,15 @@
 
 <div id="toast" class="toast"></div>
 
+<div id="busy" class="busy" hidden>
+  <div class="spin"></div>
+  <div class="txt" id="busyText">处理中…</div>
+  <div class="sub" id="busySub"></div>
+</div>
+
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=13"></script>
-<script src="onnx-export.js?v=15"></script>
-<script src="studio.js?v=15"></script>
+<script src="lattice.js?v=20"></script>
+<script src="onnx-export.js?v=20"></script>
+<script src="studio.js?v=20"></script>
 </body>
 </html>

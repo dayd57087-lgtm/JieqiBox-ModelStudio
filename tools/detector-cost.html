@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>检测器端侧训练代价实测</title>
+<style>body{background:#14161a;color:#e6e8eb;font:12px/1.55 ui-monospace,monospace;padding:10px;margin:0}
+pre{white-space:pre-wrap;word-break:break-all}.ok{color:#35c46a}.bad{color:#ff5a5a}.dim{color:#9aa1ad}</style>
+</head>
+<body>
+<pre id="out">初始化…</pre>
+<script src="../app/src/main/assets/www/vendor/tf.min.js"></script>
+<script>
+const el = document.getElementById('out');
+let buf = '';
+const log = m => { buf += m + '\n'; el.textContent = buf; };
+const ok = m => `<span class="ok">${m}</span>`;
+const bad = m => `<span class="bad">${m}</span>`;
+
+const NC = 34;   // 连线版实际用的类别数
+
+/** 代表性的检测骨架：stride 8 出预测头 */
+function buildDetector(size, variant) {
+  const m = tf.sequential();
+  m.add(tf.layers.conv2d({ inputShape: [size, size, 3], filters: 16, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+  if (variant === 'small') {
+    m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+    m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }));
+    m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+    m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  } else {
+    m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+    m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+  }
+  // 预测头：每个格子 4 个框回归 + 1 个 objectness + NC 个类概率
+  m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  m.add(tf.layers.conv2d({ filters: 5 + NC, kernelSize: 1, padding: 'same' }));
+  return m;
+}
+
+async function bench(size, variant, iters) {
+  const stride = variant === 'small' ? 8 : 8;
+  const grid = Math.ceil(size / stride);
+  const ch = 5 + NC;
+  const per = grid * grid * ch;
+
+  let model;
+  try {
+    model = buildDetector(size, variant);
+  } catch (e) { return { err: '建模失败 ' + e.message }; }
+
+  const params = model.countParams();
+
+  // 目标张量：形状与预测一致。真实训练里这是编码后的标注，代价可忽略，
+  // 这里占位即可 —— 我们要测的是它前面的卷积反传。
+  const target = tf.zeros([1, grid, grid, ch]);
+  const opt = tf.train.adam(1e-3);
+
+  const times = [];
+  let peakMem = 0;
+  try {
+    for (let i = 0; i < iters; i++) {
+      const t0 = performance.now();
+      const x = tf.randomNormal([1, size, size, 3]);
+      const lossVal = opt.minimize(() => {
+        const y = model.apply(x, { training: true });
+        return tf.losses.meanSquaredError(target, y).mean();
+      }, true);
+      lossVal.dispose();
+      x.dispose();
+      const ms = performance.now() - t0;
+      if (i > 0) times.push(ms);          // 第一轮含编译，丢掉
+      const mem = tf.memory().numBytes;
+      if (mem > peakMem) peakMem = mem;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  } catch (e) {
+    target.dispose();
+    model.dispose();
+    return { err: e.message, peakMem };
+  }
+  target.dispose();
+  model.dispose();
+
+  times.sort((a, b) => a - b);
+  const med = times[Math.floor(times.length / 2)];
+  return { params, grid: grid + 'x' + grid, per: (per / 1000).toFixed(0) + 'k', med, peakMem };
+}
+
+async function main() {
+  if (typeof tf === 'undefined') { log('tfjs 未加载'); return; }
+  let backend = 'cpu';
+  try { await tf.setBackend('webgl'); await tf.ready(); backend = tf.getBackend(); }
+  catch (e) { await tf.setBackend('cpu'); await tf.ready(); backend = tf.getBackend(); }
+  log('tfjs ' + tf.version.tfjs + ' · backend ' + backend);
+  log('类别数 ' + NC + '（与连线版一致）');
+  log('');
+
+  const runs = [];
+  for (const [size, variant, iters] of [
+    [320, 'tiny', 4],
+    [320, 'small', 4],
+    [416, 'tiny', 4],
+    [416, 'small', 3],
+    [640, 'tiny', 3]
+  ]) {
+    const tag = size + '×' + size + ' ' + variant;
+    log('▶ ' + tag + ' …');
+    const r = await bench(size, variant, iters);
+    if (r.err) {
+      log('  ' + bad('✗ ' + r.err) + (r.peakMem ? ' (峰值 ' + (r.peakMem/1048576).toFixed(0) + ' MB)' : ''));
+      runs.push({ tag, err: r.err });
+    } else {
+      // 500 张图 × 60 轮
+      const perImgMs = r.med;
+      const totalH = perImgMs * 500 * 60 / 1000 / 3600;
+      log('  每图一次反传 ' + ok(perImgMs.toFixed(0) + ' ms')
+          + ' · 网格 ' + r.grid + ' · 输出 ' + r.per + ' 值'
+          + ' · 参数 ' + (r.params / 1000).toFixed(0) + 'k'
+          + ' · 显存峰值 ' + (r.peakMem / 1048576).toFixed(0) + ' MB');
+      log('  → 500 图 × 60 轮 预计 ' + (totalH >= 1
+          ? bad(totalH.toFixed(1) + ' 小时')
+          : ok((totalH * 60).toFixed(0) + ' 分钟')));
+      runs.push({ tag, ms: perImgMs, params: r.params, mem: r.peakMem });
+    }
+    log('');
+  }
+
+  log('（对比：32×32 逐格分类器实测 0.02 ms/样本）');
+  window.__done = true;
+  window.__runs = runs;
+}
+main().catch(e => { log('异常 ' + (e && e.message)); window.__done = true; });
+</script>
+</body>
+</html>

@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>检测器端侧训练代价（含同步）</title>
+<style>body{background:#14161a;color:#e6e8eb;font:12px/1.55 ui-monospace,monospace;padding:10px;margin:0}
+pre{white-space:pre-wrap;word-break:break-all}.ok{color:#35c46a}.bad{color:#ff5a5a}.dim{color:#9aa1ad}</style>
+</head>
+<body>
+<pre id="out">初始化…</pre>
+<script src="../app/src/main/assets/www/vendor/tf.min.js"></script>
+<script>
+const el = document.getElementById('out');
+let buf = '';
+const log = m => { buf += m + '\n'; el.textContent = buf; };
+const ok = m => `<span class="ok">${m}</span>`;
+const bad = m => `<span class="bad">${m}</span>`;
+const dim = m => `<span class="dim">${m}</span>`;
+
+const NC = 34;
+
+/** depthwise 可分离卷积：真实轻量检测网络的主力构件 */
+function dw(m, ch, stride) {
+  m.add(tf.layers.depthwiseConv2d({ kernelSize: 3, strides: stride || 1, padding: 'same' }));
+  m.add(tf.layers.batchNormalization());
+  m.add(tf.layers.reLU());
+  m.add(tf.layers.conv2d({ filters: ch, kernelSize: 1, padding: 'same' }));
+  m.add(tf.layers.batchNormalization());
+  m.add(tf.layers.reLU());
+}
+
+function buildDetector(size, variant) {
+  const m = tf.sequential();
+  m.add(tf.layers.conv2d({ inputShape: [size, size, 3], filters: 16, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+  if (variant === 'tiny') {
+    m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+    m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, strides: 2, padding: 'same', activation: 'relu' }));
+  } else if (variant === 'small') {
+    dw(m, 32); dw(m, 64, 2); dw(m, 64); dw(m, 128, 2);
+  } else {  // yoloish：更接近真实 YOLOv8n 的深度
+    dw(m, 16); dw(m, 32, 2); dw(m, 32);
+    dw(m, 64, 2); dw(m, 64); dw(m, 64);
+    dw(m, 128, 2); dw(m, 128); dw(m, 128);
+    dw(m, 128); dw(m, 128);
+  }
+  m.add(tf.layers.conv2d({ filters: 64, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  m.add(tf.layers.conv2d({ filters: 5 + NC, kernelSize: 1, padding: 'same' }));
+  return m;
+}
+
+async function bench(size, variant, iters) {
+  let model;
+  try { model = buildDetector(size, variant); }
+  catch (e) { return { err: '建模失败 ' + e.message }; }
+
+  const params = model.countParams();
+  let outShape;
+  try {
+    const probe = model.apply(tf.zeros([1, size, size, 3]), { training: false });
+    outShape = probe.shape;
+    probe.dispose();
+  } catch (e) { model.dispose(); return { err: '前向失败 ' + e.message }; }
+
+  const target = tf.zeros(outShape);
+  const opt = tf.train.adam(1e-3);
+  const times = [];
+  let peakMem = 0;
+
+  try {
+    for (let i = 0; i < iters; i++) {
+      const t0 = performance.now();
+      const x = tf.randomNormal([1, size, size, 3]);
+      const lossVal = opt.minimize(() => {
+        const y = model.apply(x, { training: true });
+        return tf.losses.meanSquaredError(target, y).mean();
+      }, true);
+      // 用 dataSync() 而不是 await data()：后者在后台标签页会走定时器，
+      // 被节流到 1 秒，测出来全是假的；dataSync 是真正阻塞的读回。
+      lossVal.dataSync();
+      lossVal.dispose();
+      x.dispose();
+      const ms = performance.now() - t0;
+      if (i >= 2) times.push(ms);      // 前两轮含编译/预热
+      const mem = tf.memory().numBytes;
+      if (mem > peakMem) peakMem = mem;
+      await new Promise(r => setTimeout(r, 0));
+    }
+  } catch (e) {
+    target.dispose(); model.dispose();
+    return { err: e.message, peakMem, params };
+  }
+  target.dispose(); model.dispose();
+
+  times.sort((a, b) => a - b);
+  const med = times[Math.floor(times.length / 2)];
+  return { params, shape: outShape.join('×'), med, peakMem };
+}
+
+async function main() {
+  if (typeof tf === 'undefined') { log('tfjs 未加载'); return; }
+  let backend = 'cpu';
+  try { await tf.setBackend('webgl'); await tf.ready(); backend = tf.getBackend(); }
+  catch (e) { await tf.setBackend('cpu'); await tf.ready(); backend = tf.getBackend(); }
+  log('tfjs ' + tf.version.tfjs + ' · backend ' + backend + ' · 类别 ' + NC);
+  log(dim('每次计时都读回标量强制同步 GPU'));
+  log('');
+
+  for (const [size, variant, iters] of [
+    [320, 'tiny', 6],
+    [320, 'small', 6],
+    [320, 'yoloish', 5],
+    [416, 'small', 5],
+    [416, 'yoloish', 5],
+    [640, 'yoloish', 4]
+  ]) {
+    const tag = size + ' ' + variant;
+    log('▶ ' + tag + ' …');
+    const r = await bench(size, variant, iters);
+    if (r.err) {
+      log('  ' + bad('✗ ' + r.err)
+          + (r.params ? ' · 参数 ' + (r.params / 1000).toFixed(0) + 'k' : '')
+          + (r.peakMem ? ' · 峰值 ' + (r.peakMem / 1048576).toFixed(0) + ' MB' : ''));
+    } else {
+      const h = r.med * 500 * 60 / 1000 / 3600;
+      log('  ' + ok(r.med.toFixed(0) + ' ms/图')
+          + ' · 输出 ' + r.shape + ' · 参数 ' + (r.params / 1000).toFixed(0) + 'k'
+          + ' · 峰值 ' + (r.peakMem / 1048576).toFixed(0) + ' MB');
+      log('  → 500 图 × 60 轮 = ' + (h >= 1 ? bad(h.toFixed(1) + ' 小时') : ok((h * 60).toFixed(0) + ' 分钟')));
+    }
+    log('');
+    await new Promise(r => setTimeout(r, 0));
+  }
+  window.__done = true;
+}
+main().catch(e => { log('异常 ' + (e && e.message)); window.__done = true; });
+</script>
+</body>
+</html>
