@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>晶格拟合测试</title>
+<style>
+body{background:#14161a;color:#e6e8eb;font:12px/1.5 ui-monospace,monospace;margin:0;padding:10px}
+pre{white-space:pre-wrap}
+canvas{display:block;width:100%;border-radius:6px;margin:6px 0;background:#000}
+.ok{color:#35c46a}.bad{color:#ff5a5a}.dim{color:#9aa1ad}
+</style>
+</head>
+<body>
+<pre id="out">running…</pre>
+<div id="shots"></div>
+<script src="../app/src/main/assets/www/lattice.js?v=3"></script>
+<script>
+const out = document.getElementById('out');
+const GT = { x0: 46.5, dx: (796.5-46.5)/8, y0: 46.5, dy: (890.5-46.5)/9, W: 844, H: 938 };
+
+function grayOf(canvas){
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const d = ctx.getImageData(0,0,canvas.width,canvas.height).data;
+  const g = new Uint8ClampedArray(canvas.width*canvas.height);
+  for (let i=0,p=0;i<g.length;i++,p+=4) g[i] = (d[p]*0.299 + d[p+1]*0.587 + d[p+2]*0.114);
+  return g;
+}
+
+function drawPieces(ctx, ox, oy, scale){
+  const rand = (()=>{let s=12345; return ()=>((s=(s*1103515245+12345)&0x7fffffff)/0x7fffffff);})();
+  const chars = {1:'帅',2:'仕',3:'相',4:'马',5:'车',6:'炮',7:'兵',8:'将',9:'士',10:'象',11:'马',12:'车',13:'炮',14:'卒'};
+  for (let k=0;k<26;k++){
+    const c = Math.floor(rand()*9), r = Math.floor(rand()*10);
+    const cls = 1 + Math.floor(rand()*14);
+    const cx = (ox + (GT.x0 + c*GT.dx)*scale), cy = (oy + (GT.y0 + r*GT.dy)*scale);
+    const R = GT.dx*scale*0.46;
+    const red = cls <= 7;
+    ctx.beginPath(); ctx.arc(cx,cy,R,0,7);
+    ctx.fillStyle='#f0e0bf'; ctx.fill();
+    ctx.lineWidth=Math.max(1.5,R*0.09); ctx.strokeStyle=red?'#c62828':'#1a1a1a'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,cy,R*0.72,0,7); ctx.lineWidth=Math.max(1,R*0.05); ctx.stroke();
+    ctx.fillStyle=red?'#c62828':'#1a1a1a';
+    ctx.font=`bold ${Math.round(R*1.1)}px serif`; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(chars[cls], cx, cy);
+  }
+}
+
+function makeShot(img, W, H, ox, oy, scale, pieces){
+  const cv = document.createElement('canvas'); cv.width=W; cv.height=H;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle='#2b2f36'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#1e2127'; ctx.fillRect(0,0,W,70);          // 顶部栏
+  ctx.fillStyle='#111'; ctx.fillRect(0,H-90,W,90);          // 底部栏
+  ctx.drawImage(img, ox, oy, GT.W*scale, GT.H*scale);
+  if (pieces) drawPieces(ctx, ox, oy, scale);
+  return cv;
+}
+
+function check(name, canvas, rough){
+  const g = grayOf(canvas);
+  const t0 = performance.now();
+  const r = Lattice.fitBoard(g, canvas.width, canvas.height, rough);
+  const ms = performance.now()-t0;
+  if (!r.ok) return { name, ok:false, reason:r.reason, ms };
+  // 期望值（在缩放过/偏移过的画面里）
+  return { name, ok:true, ms, conf:r.confidence, r, g };
+}
+
+const img = new Image();
+img.onload = async () => {
+  const lines = [];
+  const shots = document.getElementById('shots');
+  const cases = [];
+
+  // 场景 1：原始棋盘图，粗略框 = 整图
+  const c1 = makeShot(img, 844, 938, 0, 0, 1, false);
+  cases.push({ name:'原始图 · 无棋子 · 整图框选', cv:c1, gt:{x0:GT.x0,dx:GT.dx,y0:GT.y0,dy:GT.dy},
+               rough:{x:0,y:0,w:844,h:938} });
+
+  // 场景 2：手机上常见的 1080×2340 截图，棋盘居中偏上，带 UI 栏
+  const s2 = 1.12;
+  const W2 = 1080, H2 = 2340;
+  const ox2 = (W2 - GT.W*s2)/2, oy2 = 300;
+  const c2 = makeShot(img, W2, H2, ox2, oy2, s2, true);
+  cases.push({ name:'1080×2340 截图 · 有棋子 · 框选偏 4%', cv:c2,
+               gt:{x0:ox2+GT.x0*s2, dx:GT.dx*s2, y0:oy2+GT.y0*s2, dy:GT.dy*s2},
+               rough:{x:ox2+GT.x0*s2-40, y:oy2+GT.y0*s2-40, w:GT.dx*s2*8+80, h:GT.dy*s2*9+80} });
+
+  // 场景 3：框选明显偏小（用户框得紧）
+  const s3 = 0.9;
+  const c3 = makeShot(img, 1200, 1600, 120, 180, s3, true);
+  cases.push({ name:'框选偏小 12% · 有棋子', cv:c3,
+               gt:{x0:120+GT.x0*s3, dx:GT.dx*s3, y0:180+GT.y0*s3, dy:GT.dy*s3},
+               rough:(()=>{const x0=120+GT.x0*s3,y0=180+GT.y0*s3,w=GT.dx*s3*8,h=GT.dy*s3*9;
+                            return {x:x0+w*0.06, y:y0+h*0.06, w:w*0.88, h:h*0.88};})() });
+
+  // 场景 4：框选明显偏大
+  const c4 = makeShot(img, 1000, 1400, 60, 90, 1.0, false);
+  cases.push({ name:'框选偏大 20% · 无棋子', cv:c4,
+               gt:{x0:60+GT.x0, dx:GT.dx, y0:90+GT.y0, dy:GT.dy},
+               rough:(()=>{const x0=60+GT.x0,y0=90+GT.y0,w=GT.dx*8,h=GT.dy*9;
+                            return {x:x0-w*0.10, y:y0-h*0.10, w:w*1.2, h:h*1.2};})() });
+
+  for (const cs of cases){
+    const res = check(cs.name, cs.cv, cs.rough);
+    if (!res.ok){ lines.push(`<span class="bad">✗</span> ${cs.name} — ${res.reason}`); continue; }
+    const ex = Math.abs(res.r.x0 - cs.gt.x0), ey = Math.abs(res.r.y0 - cs.gt.y0);
+    const edx = Math.abs(res.r.dx - cs.gt.dx), edy = Math.abs(res.r.dy - cs.gt.dy);
+    const worst = Math.max(ex, ey, edx*(8/2), edy*(9/2)) / cs.gt.dx;
+    const good = worst < 0.05;
+    lines.push(
+      `${good?'<span class="ok">✓</span>':'<span class="bad">✗</span>'} ${cs.name}\n` +
+      `   左上误差 ${ex.toFixed(1)}px / ${ey.toFixed(1)}px · 间距误差 ${edx.toFixed(2)} / ${edy.toFixed(2)} px\n` +
+      `   最大累计偏差 ${(worst*100).toFixed(1)}% 格 · 置信度 ${res.r.confidence.toFixed(2)} · ${res.ms.toFixed(0)}ms`
+    );
+
+    // 可视化
+    const vis = document.createElement('canvas');
+    vis.width = cs.cv.width; vis.height = cs.cv.height;
+    const vc = vis.getContext('2d');
+    vc.drawImage(cs.cv, 0, 0);
+    vc.strokeStyle = '#4c8dff'; vc.lineWidth = 2;
+    for (let c=0;c<9;c++){ vc.beginPath(); vc.moveTo(res.r.x0+c*res.r.dx, res.r.y0); vc.lineTo(res.r.x0+c*res.r.dx, res.r.y0+9*res.r.dy); vc.stroke(); }
+    for (let r=0;r<10;r++){ vc.beginPath(); vc.moveTo(res.r.x0, res.r.y0+r*res.r.dy); vc.lineTo(res.r.x0+8*res.r.dx, res.r.y0+r*res.r.dy); vc.stroke(); }
+    vc.strokeStyle = '#ffb020'; vc.lineWidth = 3; vc.setLineDash([8,6]);
+    vc.strokeRect(cs.rough.x, cs.rough.y, cs.rough.w, cs.rough.h);
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `<div class="dim">${cs.name}</div>`;
+    wrap.appendChild(vis);
+    shots.appendChild(wrap);
+    await new Promise(r=>setTimeout(r,0));
+  }
+  out.innerHTML = lines.join('\n\n');
+};
+img.src = '../app/src/main/assets/www/xiangqi.png';
+</script>
+</body>
+</html>

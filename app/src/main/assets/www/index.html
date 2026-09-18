@@ -2,33 +2,147 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<style>
-body{background:#14161a;color:#e6e8eb;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;margin:0;padding:16px}
-h1{font-size:17px;margin:0 0 12px}
-pre{white-space:pre-wrap;font:12px/1.6 ui-monospace,monospace;color:#9aa1ad;background:#1e2127;padding:12px;border-radius:10px}
-</style>
+<link rel="stylesheet" href="studio.css?v=8">
 </head>
 <body>
-<h1>模型工坊</h1>
-<pre id="out">自检中…</pre>
+
+<header class="topbar">
+  <div class="brand">模型工坊</div>
+  <nav class="tabs">
+    <button data-tab="samples" class="on">样本</button>
+    <button data-tab="annotate">标注</button>
+    <button data-tab="train">训练</button>
+    <button data-tab="models">模型</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ========== 样本 ========== -->
+<section id="tab-samples" class="tab on">
+  <div class="card">
+    <div class="row">
+      <button id="btnImport" class="primary">导入截图</button>
+      <button id="btnDemo">生成演示局面</button>
+      <button id="btnClearSamples" class="danger-ghost">清空</button>
+    </div>
+    <input id="fileInput" type="file" accept="image/*" multiple hidden>
+    <div id="sampleSummary" class="muted mt8">还没有样本。导入对局截图，或先点「生成演示局面」验证整条链路。</div>
+  </div>
+  <div id="sampleGrid" class="grid"></div>
+</section>
+
+<!-- ========== 标注 ========== -->
+<section id="tab-annotate" class="tab">
+  <div id="annotateEmpty" class="card muted">先在「样本」里导入截图。</div>
+
+  <div id="annotateBody" hidden>
+    <div class="card tight">
+      <div class="row between">
+        <button id="btnPrev" class="icon">‹</button>
+        <div class="grow center">
+          <div id="imgName" class="ellipsis">—</div>
+          <div id="calibInfo" class="muted tiny">未标定</div>
+        </div>
+        <button id="btnNext" class="icon">›</button>
+      </div>
+    </div>
+
+    <div class="stagewrap">
+      <canvas id="stage"></canvas>
+      <div id="stageHint" class="stagehint"></div>
+    </div>
+
+    <div class="card tight">
+      <div class="row">
+        <button id="btnCalib" class="primary">框选棋盘</button>
+        <button id="btnAuto">自动校正</button>
+        <button id="btnNudge">微调</button>
+        <button id="btnCopyPrev">复制上局</button>
+        <button id="btnClearCells" class="danger-ghost">清空格子</button>
+      </div>
+      <div class="row mt8">
+        <button id="btnZoomOut">－</button>
+        <span id="zoomLabel" class="tiny muted" style="min-width:38px;text-align:center">1.0×</span>
+        <button id="btnZoomIn">＋</button>
+        <button id="btnZoomFit">适应</button>
+        <span class="muted tiny" style="margin-left:auto">双指捏合也可缩放</span>
+      </div>
+    </div>
+
+    <div class="card tight">
+      <div class="row between mb6">
+        <span class="muted tiny">当前笔刷</span>
+        <span id="cellProgress" class="tiny">已标注 0 / 90</span>
+      </div>
+      <div id="palette" class="palette"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 训练 ========== -->
+<section id="tab-train" class="tab">
+  <div class="card">
+    <h2>数据集</h2>
+    <div id="dataSummary" class="muted">还没有已标注的样本。</div>
+    <div class="row mt8">
+      <button id="btnBuild" class="primary">构建数据集</button>
+      <button id="btnPreviewCells" disabled>看切片</button>
+    </div>
+    <canvas id="cellPreview" class="mt8" hidden></canvas>
+  </div>
+
+  <div class="card">
+    <h2>参数</h2>
+    <div class="params">
+      <label>输入尺寸 <input type="number" id="pSize" value="32" min="16" max="64" step="4"></label>
+      <label>轮数 <input type="number" id="pEpochs" value="40" min="1" max="400"></label>
+      <label>批大小 <input type="number" id="pBatch" value="64" min="8" max="512" step="8"></label>
+      <label>保留空格 <input type="number" id="pEmpty" value="30" min="0" max="100" step="5"></label>
+      <label>验证图片 <input type="number" id="pVal" value="20" min="10" max="40" step="5"></label>
+    </div>
+    <div class="row mt8">
+      <button id="btnTrain" class="primary" disabled>开始训练</button>
+      <button id="btnStop" disabled>停止</button>
+    </div>
+    <div class="bar mt8"><i id="trainProg"></i></div>
+    <div id="trainStat" class="muted tiny mt6">—</div>
+  </div>
+
+  <div class="card" id="resultCard" hidden>
+    <h2>结果</h2>
+    <div id="evalStat"></div>
+    <div class="row mt8">
+      <button id="btnSaveModel" class="primary">保存模型</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>日志</h2>
+    <pre id="log" class="logbox"></pre>
+  </div>
+</section>
+
+<!-- ========== 模型 ========== -->
+<section id="tab-models" class="tab">
+  <div class="card">
+    <h2>已保存的模型</h2>
+    <div id="modelList" class="muted">还没有保存过模型。</div>
+  </div>
+  <div class="card">
+    <h2>关于</h2>
+    <div id="aboutBox" class="muted tiny">—</div>
+  </div>
+</section>
+
+</main>
+
+<div id="toast" class="toast"></div>
+
 <script src="vendor/tf.min.js"></script>
-<script>
-const out = document.getElementById('out');
-async function run(){
-  const lines = [];
-  const native = typeof window.StudioNative !== 'undefined';
-  lines.push('原生外壳: ' + (native ? '已连接' : '浏览器预览模式'));
-  if (native) lines.push('版本: ' + StudioNative.appVersion() + ' / ' + StudioNative.platform());
-  lines.push('tfjs: ' + (typeof tf !== 'undefined' ? tf.version.tfjs : '未加载'));
-  if (typeof tf !== 'undefined') {
-    try { await tf.setBackend('webgl'); await tf.ready(); } catch(e){ await tf.setBackend('cpu'); await tf.ready(); }
-    lines.push('后端: ' + tf.getBackend());
-  }
-  out.textContent = lines.join('\n');
-}
-run();
-</script>
+<script src="lattice.js?v=8"></script>
+<script src="studio.js?v=8"></script>
 </body>
 </html>
