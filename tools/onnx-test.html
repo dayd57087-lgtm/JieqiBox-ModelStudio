@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ONNX 导出对拍</title>
+<style>
+body{background:#14161a;color:#e6e8eb;font:12px/1.55 ui-monospace,monospace;margin:0;padding:10px}
+pre{white-space:pre-wrap;word-break:break-all}
+.ok{color:#35c46a;font-weight:600}
+.bad{color:#ff5a5a;font-weight:600}
+.dim{color:#9aa1ad}
+h2{font-size:13px;color:#4c8dff;margin:14px 0 4px}
+</style>
+</head>
+<body>
+<pre id="out">加载中…</pre>
+<script src="../app/src/main/assets/www/vendor/tf.min.js"></script>
+<script src="../app/src/main/assets/www/onnx-export.js?v=4"></script>
+<script src="https://registry.npmmirror.com/onnxruntime-web/1.19.2/files/dist/ort.min.js"></script>
+<script>
+const el = document.getElementById('out');
+let buf = '';
+const log = m => { buf += m + '\n'; el.textContent = buf; };
+const $ = (cls, m) => `<span class="${cls}">${m}</span>`;
+
+// 与 studio.js 的 buildModel 保持逐行一致
+function buildModel(size, NC) {
+  const m = tf.sequential();
+  m.add(tf.layers.conv2d({ inputShape: [size, size, 3], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.conv2d({ filters: 48, kernelSize: 3, padding: 'same', activation: 'relu' }));
+  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+  m.add(tf.layers.flatten());
+  m.add(tf.layers.dense({ units: 96, activation: 'relu' }));
+  m.add(tf.layers.dropout({ rate: 0.25 }));
+  m.add(tf.layers.dense({ units: NC }));
+  return m;
+}
+
+async function run() {
+  if (typeof tf === 'undefined') { log('tfjs 未加载'); return; }
+  if (typeof ort === 'undefined') { log('onnxruntime-web 未加载'); return; }
+  if (typeof OnnxExport === 'undefined') { log('onnx-export.js 未加载'); return; }
+
+  log('tfjs ' + tf.version.tfjs + ' / ort ' + ort.env.versions?.web || 'ort ok');
+  await tf.setBackend('webgl').catch(() => {});
+  await tf.ready();
+  log('backend ' + tf.getBackend());
+
+  // wasm 从 CDN 取，本机没有本地副本
+  ort.env.wasm.wasmPaths = 'https://registry.npmmirror.com/onnxruntime-web/1.19.2/files/dist/';
+  ort.env.logLevel = 'error';
+
+  const NC = 16;
+  let allOk = true;
+
+  for (const size of [16, 24, 32]) {
+    log('');
+    log('════ 输入 ' + size + '×' + size + ' ════');
+    const model = buildModel(size, NC);
+    const params = model.countParams();
+
+    // 固定随机输入，两边喂同一份数据
+    const N = 3;
+    const px = size * size * 3;
+    const data = new Float32Array(N * px);
+    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+
+    // ---- TF.js 侧 ----
+    const tfOut = tf.tidy(() => {
+      const x = tf.tensor4d(data, [N, size, size, 3]);
+      return model.apply(x, { training: false });
+    });
+    const tfArr = await tfOut.data();
+    tfOut.dispose();
+
+    // ---- 导出 ONNX ----
+    let built;
+    try {
+      built = OnnxExport.buildOnnx(model, { size, numClasses: NC });
+    } catch (e) {
+      log($('bad', '✗ 导出失败: ' + e.message));
+      allOk = false;
+      continue;
+    }
+    const kb = (built.bytes.length / 1024).toFixed(0);
+    log('ONNX 字节 ' + built.bytes.length + ' (' + kb + ' KB) · 参数 ' + params
+        + ' · conv×' + built.summary.conv + ' pool×' + built.summary.pool
+        + ' dense×' + built.summary.dense);
+
+    // ---- ORT 侧 ----
+    let sess;
+    try {
+      sess = await ort.InferenceSession.create(built.bytes, { executionProviders: ['wasm'] });
+    } catch (e) {
+      log($('bad', '✗ ORT 建会话失败: ' + (e && e.message)));
+      allOk = false;
+      continue;
+    }
+    log('ORT 接受该模型 · 输入 ' + sess.inputNames + ' 输出 ' + sess.outputNames);
+
+    let ortArr;
+    try {
+      const t = new ort.Tensor('float32', data, [N, size, size, 3]);
+      const res = await sess.run({ [sess.inputNames[0]]: t });
+      ortArr = res[sess.outputNames[0]].data;
+    } catch (e) {
+      log($('bad', '✗ ORT 推理失败: ' + (e && e.message)));
+      allOk = false;
+      continue;
+    }
+
+    // ---- 对拍 ----
+    let maxAbs = 0, maxRel = 0, bad = 0;
+    for (let i = 0; i < tfArr.length; i++) {
+      const d = Math.abs(tfArr[i] - ortArr[i]);
+      if (d > maxAbs) maxAbs = d;
+      const scale = Math.max(1e-6, Math.abs(tfArr[i]));
+      const rel = d / scale;
+      if (rel > maxRel) maxRel = rel;
+      if (d > 1e-3) bad++;
+    }
+
+    // 顺便比一下 argmax 是否一致（真正被用到的判定）
+    let argmaxMismatch = 0;
+    for (let n = 0; n < N; n++) {
+      let a = 0, b = 0;
+      for (let c = 1; c < NC; c++) {
+        if (tfArr[n * NC + c] > tfArr[n * NC + a]) a = c;
+        if (ortArr[n * NC + c] > ortArr[n * NC + b]) b = c;
+      }
+      if (a !== b) argmaxMismatch++;
+    }
+
+    const pass = maxAbs < 1e-3 && argmaxMismatch === 0;
+    log('最大绝对误差 ' + maxAbs.toExponential(3)
+        + ' · 超差元素 ' + bad + '/' + tfArr.length
+        + ' · argmax 不一致 ' + argmaxMismatch + '/' + N);
+    log(pass ? $('ok', '✓ 通过') : $('bad', '✗ 不通过'));
+    if (!pass) allOk = false;
+
+    model.dispose();
+  }
+
+  log('');
+  log(allOk ? $('ok', '═══ 全部通过：导出的 ONNX 与 TF.js 输出一致 ═══')
+            : $('bad', '═══ 有失败项 ═══'));
+  window.__done = true;
+  window.__allOk = allOk;
+}
+
+run().catch(e => { log('异常: ' + (e && e.stack || e)); window.__done = true; window.__allOk = false; });
+</script>
+</body>
+</html>

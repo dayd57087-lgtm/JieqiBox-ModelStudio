@@ -1307,6 +1307,7 @@
         (d.desc ? '<div class="muted tiny">' + escapeHtml(d.desc) + '</div>' : '') +
         '<div class="row mt6"><button data-load="' + i + '">载入并测试</button>' +
         '<button data-export="' + i + '">导出</button>' +
+        '<button data-onnx="' + i + '">ONNX</button>' +
         '<button data-del="' + i + '" class="danger-ghost">删除</button></div></div>';
     }).join('');
 
@@ -1326,6 +1327,13 @@
     });
     Array.prototype.forEach.call(el.querySelectorAll('button[data-export]'), function (b) {
       b.addEventListener('click', function () { exportModelRecord(savedModels[+b.dataset.export]); });
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('button[data-onnx]'), function (b) {
+      b.addEventListener('click', function () {
+        var rec = savedModels[+b.dataset.onnx];
+        b.disabled = true;
+        exportOnnxFromRecord(rec).then(function () { b.disabled = false; });
+      });
     });
     Array.prototype.forEach.call(el.querySelectorAll('button[data-del]'), function (b) {
       b.addEventListener('click', function () {
@@ -1726,6 +1734,82 @@
     }
   }
 
+  // ------------------------------------------------ ONNX 导出
+
+  /** 组装导出用的元数据：拿到 .onnx 的人不必再翻源码就知道类别顺序 */
+  function onnxMeta(size, desc) {
+    return {
+      labels: LABEL_IDS.join(','),
+      input_size: String(size) + 'x' + String(size),
+      input_layout: 'NHWC',
+      output: 'logits (未过 softmax)',
+      grid: COLS + 'x' + ROWS,
+      crop_k: String(CROP_K),
+      note: desc || '逐格分类器：输入是以交叉点为中心的方格裁切'
+    };
+  }
+
+  function saveBytes(name, bytes, mime) {
+    var nat = native();
+    if (nat) {
+      var r = nat.saveFile(name, abToBase64(bytes));
+      if (String(r).indexOf('ERROR') === 0) { toast('导出失败：' + r); return null; }
+      return String(r).replace(/[^/]*$/, '');
+    }
+    downloadBlob(new Blob([bytes], { type: mime || 'application/octet-stream' }), name);
+    return '下载目录';
+  }
+
+  /** 把内存里的模型导出成 ONNX */
+  function exportOnnx(m, size, baseName, desc) {
+    if (!m) { toast('还没有模型'); return false; }
+    if (typeof OnnxExport === 'undefined') { toast('ONNX 导出模块未加载'); return false; }
+    var built;
+    try {
+      built = OnnxExport.buildOnnx(m, {
+        size: size,
+        numClasses: NC,
+        meta: onnxMeta(size, desc)
+      });
+    } catch (e) {
+      log('ONNX 导出失败：' + e.message);
+      toast('ONNX 导出失败：' + e.message);
+      return false;
+    }
+    var where = saveBytes(baseName + '.onnx', built.bytes, 'application/octet-stream');
+    if (!where) return false;
+    log('已导出 ' + baseName + '.onnx（' + fmt(built.bytes.length / 1024, 0) + ' KB，'
+        + built.summary.conv + ' 卷积 / ' + built.summary.dense + ' 全连接）');
+    toast('已导出 ONNX 到 ' + where, 2800);
+    return true;
+  }
+
+  /** 从库里保存的记录导出 ONNX：先还原成 tf 模型，再走同一个导出路径 */
+  async function exportOnnxFromRecord(rec) {
+    var m = null;
+    try {
+      m = await tf.loadLayersModel(tf.io.fromMemory({
+        modelTopology: rec.modelTopology,
+        weightSpecs: rec.weightSpecs,
+        weightData: rec.weightData
+      }));
+      var desc = (rec.meta && rec.meta.desc) || '';
+      exportOnnx(m, rec.size, rec.name, desc);
+    } catch (e) {
+      log('从记录导出 ONNX 失败：' + e.message);
+      toast('导出失败：' + e.message);
+    } finally {
+      if (m) m.dispose();
+    }
+  }
+
+  $('btnExportOnnx').addEventListener('click', function () {
+    if (!model) { toast('还没有训练好的模型'); return; }
+    var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 13);
+    var base = 'jieqi-cells-' + inSize + '-' + stamp;
+    exportOnnx(model, inSize, base, currentMeta);
+  });
+
   $('btnSaveModel').addEventListener('click', async function () {
     if (!model) { toast('还没有训练好的模型'); return; }
     $('btnSaveModel').disabled = true;
@@ -1761,6 +1845,16 @@
       return -1;
     },
     sampleKeys: function () { return samples.slice(0, 5).map(function (s) { return s.key; }); },
+    /** 直接产出 ONNX 字节，供自动化验证使用 */
+    onnxBytes: function () {
+      if (!model || typeof OnnxExport === 'undefined') return null;
+      var built = OnnxExport.buildOnnx(model, {
+        size: inSize,
+        numClasses: NC,
+        meta: onnxMeta(inSize, currentMeta)
+      });
+      return { bytes: built.bytes, summary: built.summary };
+    },
     imagePoint: function (lx, ly) { return toImage({ x: lx, y: ly }); },
     paint: function (lx, ly) { paintAt(toImage({ x: lx, y: ly })); }
   };

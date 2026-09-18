@@ -48,9 +48,55 @@ https://github.com/dayd57087-lgtm/JieqiBox-ModelStudio/releases/download/studio-
 - 空格默认只保留 30%，否则模型会退化成「全猜空」
 - 参考量级：40 张图 / 3600 格，输入 32×32，10 轮约 18 秒，验证集准确率 ~92%
 
-训练完会自动把模型存一份在应用里（关掉再打开还能用），
-点「保存模型」另外导出一份到「下载/模型工坊」，格式是 TF.js layers-model（`.json` + `.bin`），
-`userData` 里带类别表、输入尺寸、网格参数和裁切系数。
+## 导出
+
+训练完会自动把模型存一份在应用里（关掉再打开还能用），另有三个导出按钮：
+
+| 按钮 | 产物 | 用途 |
+|---|---|---|
+| **保存模型** | `.json` + `.bin` | TF.js layers-model，存进应用同时导出到「下载/模型工坊」 |
+| **导出 ONNX** | `.onnx` | 通用格式，任何支持 ONNX 的运行时都能加载 |
+| 「模型」页的 **ONNX** | `.onnx` | 对已保存的历史模型补导，不必重新训练 |
+
+### ONNX 的接口约定
+
+```
+输入  'input'   [N, H, W, 3]   float32 · NHWC
+输出  'logits'  [N, classes]   float32 · 未过 softmax（与 TF.js 模型逐位一致）
+```
+
+H 和 W 是训练时选的输入边长（16/24/32/48/64）。图内部开头会转成 NCHW 跑卷积
+（ONNX 的 Conv 规范要求），全连接之前再转回 NHWC —— 这一步不能省：
+NCHW 展平是 `(c,h,w)` 顺序，而 TF.js 训练时用的是 `(h,w,c)`，直接展平会让权重全部错位。
+
+模型自带元数据，拿到 `.onnx` 的人不必翻源码就知道输出第几维对应哪个棋子：
+
+```
+labels = empty,r_general,r_advisor,...,dark
+input_size = 32x32
+input_layout = NHWC
+output = logits (未过 softmax)
+grid = 9x10
+crop_k = 1.14
+```
+
+### 为什么手写 protobuf
+
+tf2onnx / onnx 那套依赖 Python 和完整的 TF 图，在 Android WebView 里跑不起来。
+本工坊的模型结构完全已知（就 Conv/Relu/MaxPool/Flatten/Dense 几种层），
+手写 protobuf 反而更可靠、体积也更小，还不用多带一个几十兆的依赖。
+
+### 怎么验证导出是对的
+
+`tools/onnx-test.html`：对同一个模型，TF.js 跑一遍、导出的 ONNX 用 onnxruntime-web 跑一遍，
+比对输出。权重是随机的 —— 随机的数字让任何下标错位都立刻暴露，比训练过的权重更能查出问题。
+
+实测三档输入尺寸（16/24/32），最大绝对误差 3.4e-7（float32 精度极限），
+argmax 完全一致。改完导出器后重新打开这个页面就能回归。
+
+> 踩过的坑：ONNX 的 `ModelProto` 里 **graph 是 field 7、opset_import 是 field 8**。
+> 这两个极易记反，而且写错时 protobuf 不会报解析失败（wire type 相同），
+> 运行时只会说「No graph was found in the protobuf」，很难定位。
 
 ## 怎么判断训得好不好
 
@@ -134,9 +180,11 @@ TF.js 在 WebGL 后端上跑得动小分类器，而且标注 UI 和训练循环
 ```
 app/src/main/assets/www/    UI 与全部逻辑（可直接在浏览器里跑，方便迭代）
   lattice.js                棋盘晶格拟合
+  onnx-export.js            手写 protobuf 的 ONNX 导出
   studio.js                 样本 / 标注 / 训练 / 导出
 app/src/main/java/.../MainActivity.kt   原生壳
 tools/lattice-test.html     晶格拟合的四场景回归测试
+tools/onnx-test.html        ONNX 导出的 TF.js ↔ onnxruntime 对拍回归
 .github/workflows/build.yml 构建并签名 APK，发布到 studio-latest
 ```
 

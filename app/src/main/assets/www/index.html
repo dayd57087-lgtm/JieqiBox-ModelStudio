@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=12">
+<link rel="stylesheet" href="studio.css?v=13">
 </head>
 <body>
 
@@ -118,6 +118,7 @@
     <canvas id="lossCurve" height="120" hidden></canvas>
     <div class="row mt8">
       <button id="btnSaveModel" class="primary">保存模型</button>
+      <button id="btnExportOnnx">导出 ONNX</button>
       <button id="btnBacktest">逐图回测</button>
     </div>
   </div>
@@ -152,7 +153,8 @@
 <div id="toast" class="toast"></div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=12"></script>
-<script src="studio.js?v=12"></script>
+<script src="lattice.js?v=13"></script>
+<script src="onnx-export.js?v=15"></script>
+<script src="studio.js?v=15"></script>
 </body>
 </html>
