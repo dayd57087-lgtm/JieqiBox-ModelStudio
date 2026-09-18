@@ -161,7 +161,7 @@
     });
     if (name === 'annotate') renderStage();
     if (name === 'train') refreshTrainTab();
-    if (name === 'models') renderModels();
+    if (name === 'models') refreshSavedModels();
   }
   Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
     b.addEventListener('click', function () { showTab(b.dataset.tab); });
@@ -256,6 +256,8 @@
         }
         current = i;
         mode = s.lattice ? 'paint' : 'draw';
+        showPred = false;
+        lastPred = null;
         updateModeButtons();
         showTab('annotate');
         renderStage();
@@ -468,7 +470,11 @@
     sctx.scale(S, S);
     sctx.imageSmoothingEnabled = S < 1;
     sctx.drawImage(stageImg, 0, 0);
-    if (s.lattice) { drawLattice(s.lattice, S); drawMarkers(s, S); }
+    if (s.lattice) {
+      drawLattice(s.lattice, S);
+      if (showPred && lastPred) drawPredMarks(s, lastPred, S);
+      else drawMarkers(s, S);
+    }
     if (mode === 'draw' && drawStart && drawNow) drawRough(drawStart, drawNow, S);
     sctx.restore();
 
@@ -477,9 +483,17 @@
       ? ('已标定 · 置信度 ' + fmt(s.conf, 1) + ' · 格子 ' +
          fmt(Math.max(s.lattice.dx * s.w, s.lattice.dy * s.h) * S, 0) + 'px 显示')
       : '未标定 — 拖动框住棋盘';
-    hint.textContent = mode === 'draw'
-      ? '在棋盘外沿拖一个框，大致圈住九路十行即可，会自动精修'
-      : (mode === 'nudge' ? '拖动整体平移，拖右下角缩放' : '点格子落子。放大后可拖动平移');
+    if (showPred && lastPred) {
+      var dd = diffOf(s, lastPred);
+      hint.textContent = dd.diff.length === 0
+        ? '模型预测与标注完全一致 ✓'
+        : ('模型预测有 ' + dd.diff.length + ' 格不符（其中非空 ' + dd.wrongNonEmpty +
+           ' 格）· 红=模型判错，绿=判对');
+    } else {
+      hint.textContent = mode === 'draw'
+        ? '在棋盘外沿拖一个框，大致圈住九路十行即可，会自动精修'
+        : (mode === 'nudge' ? '拖动整体平移，拖右下角缩放' : '点格子落子。放大后可拖动平移');
+    }
     $('zoomLabel').textContent = fmt(view.zoom, 1) + '×';
     updateProgress();
   }
@@ -557,6 +571,35 @@
         sctx.font = 'bold ' + Math.round(R * 1.3) + 'px "PingFang SC",serif';
         sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
         sctx.fillText(CLASSES[v].g, cx, cy);
+      }
+    }
+  }
+
+  /** 叠加显示模型预测：绿=与标注一致，红=不一致（包括「实际有子却预测成空」） */
+  function drawPredMarks(s, pred, S) {
+    var IW = view.imgW, IH = view.imgH;
+    var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
+    var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
+    var R = Math.min(dx, dy) * 0.34;
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var i = r * COLS + c;
+        var truth = s.cells ? s.cells[i] : 0;
+        var p = pred[i];
+        var wrong = p !== truth;
+        if (p === 0 && !wrong) continue;         // 两边都是空，没什么可看的
+        var cx = x0 + c * dx, cy = y0 + r * dy;
+        sctx.beginPath();
+        sctx.arc(cx, cy, R, 0, Math.PI * 2);
+        sctx.fillStyle = wrong ? 'rgba(224,82,82,.32)' : 'rgba(53,196,106,.24)';
+        sctx.fill();
+        sctx.lineWidth = (wrong ? 2.6 : 1.4) / S;
+        sctx.strokeStyle = wrong ? '#ff5a5a' : '#35c46a';
+        sctx.stroke();
+        sctx.fillStyle = wrong ? '#ffe0e0' : '#d8f5e2';
+        sctx.font = 'bold ' + Math.round(R * 1.05) + 'px "PingFang SC",serif';
+        sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+        sctx.fillText(p === 0 ? '空' : CLASSES[p].g, cx, cy);
       }
     }
   }
@@ -878,6 +921,36 @@
     };
     if (fitFromRough(rough)) { queueSave(s); renderStage(); toast('已重新校正'); }
   });
+  // 用模型检查当前这张图：把预测叠加到棋盘上，错的格子标红
+  $('btnCheckModel').addEventListener('click', async function () {
+    var s = currentSample();
+    if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
+    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+
+    if (showPred) { showPred = false; renderStage(); return; }
+
+    if (backtest[s.key]) {
+      lastPred = backtest[s.key].pred;
+    } else {
+      $('btnCheckModel').disabled = true;
+      $('btnCheckModel').textContent = '推理中…';
+      try {
+        var pred = await predictCells(s, inSize);
+        backtest[s.key] = { pred: pred, diff: diffOf(s, pred) };
+        lastPred = pred;
+      } catch (e) {
+        toast('推理失败：' + e.message);
+        $('btnCheckModel').disabled = false;
+        $('btnCheckModel').textContent = '用模型检查';
+        return;
+      }
+      $('btnCheckModel').disabled = false;
+      $('btnCheckModel').textContent = '用模型检查';
+    }
+    showPred = true;
+    renderStage();
+  });
+
   $('btnClearCells').addEventListener('click', function () {
     var s = currentSample();
     if (!s || !s.cells) return;
@@ -939,7 +1012,8 @@
   }
 
   // ---------------------------------------------------------------- 数据集
-  var master = null, masterLabels = null, trainIdx = null, valIdx = null, valLabelsArr = null;
+  var master = null, masterLabels = null, valLabelsArr = null;
+  var valKeys = {};      // 上一轮训练用到的验证图，回测时用来分开统计
 
   function usable() {
     return samples.filter(function (s) { return s.lattice && s.cells; });
@@ -983,6 +1057,7 @@
       var t = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = t;
     }
     for (var k = 0; k < nVal; k++) valSet[shuffled[k].key] = 1;
+    valKeys = valSet;
 
     var keepEmpty = clamp(parseInt($('pEmpty').value, 10) / 100, 0, 1);
 
@@ -1113,6 +1188,154 @@
     return a;
   }
 
+  // ------------------------------------------------ 用训练好的模型跑单张图
+
+  /** 对一张已标定的图逐格推理，返回 90 个预测类别 */
+  async function predictCells(s, size) {
+    if (!model) return null;
+    var img = await imageOf(s);
+    var px = size * size * 3;
+    var data = cropCells(img, s.lattice, s.w, s.h, size);
+    var arr = new Float32Array(CELLS * px);
+    for (var i = 0; i < arr.length; i++) arr[i] = data[i] / 255;
+
+    var t = tf.tidy(function () {
+      var xs = tf.tensor4d(arr, [CELLS, size, size, 3]);
+      var logits = model.apply(xs, { training: false });
+      return tf.argMax(logits, -1);
+    });
+    var d = await t.data();
+    t.dispose();
+
+    var out = new Int32Array(CELLS);
+    for (var j = 0; j < CELLS; j++) out[j] = d[j];
+    return out;
+  }
+
+  /** 对比预测与人工标注 */
+  function diffOf(s, pred) {
+    var diff = [], wrongNonEmpty = 0, wrongEmpty = 0;
+    for (var i = 0; i < CELLS; i++) {
+      var truth = s.cells ? s.cells[i] : 0;
+      if (pred[i] === truth) continue;
+      diff.push({ idx: i, truth: truth, pred: pred[i] });
+      if (truth > 0) wrongNonEmpty++; else wrongEmpty++;
+    }
+    return { diff: diff, wrongNonEmpty: wrongNonEmpty, wrongEmpty: wrongEmpty };
+  }
+
+  // 回测结果：key -> {pred, diff}
+  var backtest = {};
+  var showPred = false;    // 标注画布是否叠加显示模型预测
+  var lastPred = null;     // 当前图的预测
+
+  // ------------------------------------------------ 模型持久化
+  // 不存下来的话，关掉应用模型就没了，等于没法「训练完隔天再测」。
+
+  var MODEL_PREFIX = 'model:';
+  var AUTO_MODEL_NAME = '最近一次训练';
+
+  function isModelRecord(r) { return r && String(r.key || '').indexOf(MODEL_PREFIX) === 0; }
+
+  function saveModelToDb(name, meta) {
+    return new Promise(function (resolve, reject) {
+      model.save(tf.io.withSaveHandler(function (artifacts) {
+        var rec = {
+          key: MODEL_PREFIX + name,
+          name: name,
+          size: inSize,
+          classIds: LABEL_IDS,
+          cropK: CROP_K,
+          grid: { cols: COLS, rows: ROWS },
+          modelTopology: artifacts.modelTopology,
+          weightSpecs: artifacts.weightSpecs,
+          weightData: artifacts.weightData,
+          meta: meta || null,
+          at: Date.now()
+        };
+        dbPut(rec).then(function () { resolve(rec); }).catch(reject);
+      })).catch(reject);
+    });
+  }
+
+  function loadModelFromRecord(rec) {
+    try {
+      var m = tf.loadLayersModel(tf.io.fromMemory({
+        modelTopology: rec.modelTopology,
+        weightSpecs: rec.weightSpecs,
+        weightData: rec.weightData
+      }));
+      return Promise.resolve(m).then(function (mm) {
+        if (model) { model.dispose(); }
+        model = mm;
+        inSize = rec.size || inSize;
+        $('pSize').value = inSize;
+        log('已载入模型「' + rec.name + '」· 输入 ' + inSize + '×' + inSize);
+        return mm;
+      });
+    } catch (e) {
+      log('载入模型失败：' + e.message);
+      return Promise.reject(e);
+    }
+  }
+
+  var savedModels = [];
+
+  function refreshSavedModels() {
+    return dbAll().then(function (all) {
+      savedModels = (all || []).filter(isModelRecord).sort(function (a, b) { return b.at - a.at; });
+      renderSavedModels();
+    });
+  }
+
+  function renderSavedModels() {
+    var el = $('modelList');
+    if (!el) return;
+    if (!savedModels.length) {
+      el.innerHTML = '<span class="muted">还没有模型。去「训练」跑一次 —— 训完会自动存一份在应用里，' +
+        '关掉再打开也能继续回测和导出。</span>';
+      return;
+    }
+    el.innerHTML = savedModels.map(function (m, i) {
+      var d = m.meta || {};
+      return '<div class="m"><div><b>' + escapeHtml(m.name) + '</b>' +
+        (i === 0 ? ' <span class="tag">最近</span>' : '') + '</div>' +
+        '<div class="muted tiny">输入 ' + m.size + '×' + m.size + ' · ' +
+        ((m.classIds || []).length) + ' 类 · ' +
+        fmt((m.weightData ? m.weightData.byteLength : 0) / 1024, 0) + ' KB · ' +
+        new Date(m.at).toLocaleString() + '</div>' +
+        (d.desc ? '<div class="muted tiny">' + escapeHtml(d.desc) + '</div>' : '') +
+        '<div class="row mt6"><button data-load="' + i + '">载入并测试</button>' +
+        '<button data-export="' + i + '">导出</button>' +
+        '<button data-del="' + i + '" class="danger-ghost">删除</button></div></div>';
+    }).join('');
+
+    Array.prototype.forEach.call(el.querySelectorAll('button[data-load]'), function (b) {
+      b.addEventListener('click', function () {
+        var rec = savedModels[+b.dataset.load];
+        b.disabled = true;
+        loadModelFromRecord(rec).then(function () {
+          toast('已载入「' + rec.name + '」，可以回测了');
+          refreshTrainTab();
+          b.disabled = false;
+        }).catch(function (e) {
+          toast('载入失败：' + e.message);
+          b.disabled = false;
+        });
+      });
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('button[data-export]'), function (b) {
+      b.addEventListener('click', function () { exportModelRecord(savedModels[+b.dataset.export]); });
+    });
+    Array.prototype.forEach.call(el.querySelectorAll('button[data-del]'), function (b) {
+      b.addEventListener('click', function () {
+        var rec = savedModels[+b.dataset.del];
+        if (!confirm('删除模型「' + rec.name + '」？')) return;
+        dbDel(rec.key).then(refreshSavedModels);
+      });
+    });
+  }
+
   async function evaluate() {
     var vM = window.__vMaster;
     var size = inSize, px = size * size * 3;
@@ -1154,35 +1377,204 @@
     };
   }
 
-  function renderEval(r, secondsPerEpoch, totalSeconds) {
+  /** 训练 loss 曲线：一眼看出是否还在下降（欠拟合）或已经平了（该加数据了） */
+  function drawLossCurve(hist) {
+    var cv = $('lossCurve');
+    if (!hist || hist.length < 2) { cv.hidden = true; return; }
+    cv.hidden = false;
+
+    var w = Math.max(200, cv.clientWidth || 320), h = 120;
+    var dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    cv.style.height = h + 'px';
+    var c = cv.getContext('2d');
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    c.clearRect(0, 0, w, h);
+
+    var padL = 34, padR = 8, padT = 14, padB = 18;
+    var lo = Math.min.apply(null, hist), hi = Math.max.apply(null, hist);
+    if (hi - lo < 1e-6) hi = lo + 1;
+    var X = function (i) { return padL + (w - padL - padR) * (i / (hist.length - 1)); };
+    var Y = function (v) { return padT + (h - padT - padB) * (1 - (v - lo) / (hi - lo)); };
+
+    c.strokeStyle = '#262c34'; c.lineWidth = 1;
+    for (var g = 0; g <= 3; g++) {
+      var yy = padT + (h - padT - padB) * g / 3;
+      c.beginPath(); c.moveTo(padL, yy); c.lineTo(w - padR, yy); c.stroke();
+    }
+    c.beginPath(); c.strokeStyle = '#4c8dff'; c.lineWidth = 2;
+    hist.forEach(function (v, i) { i ? c.lineTo(X(i), Y(v)) : c.moveTo(X(i), Y(v)); });
+    c.stroke();
+
+    c.fillStyle = '#98a0ac'; c.font = '9px ui-monospace,monospace';
+    c.textAlign = 'right'; c.textBaseline = 'middle';
+    c.fillText(hi.toFixed(2), padL - 4, padT);
+    c.fillText(lo.toFixed(2), padL - 4, h - padB);
+    c.textAlign = 'left'; c.textBaseline = 'top';
+    c.fillText('训练 loss', padL + 3, 1);
+    c.textAlign = 'right';
+    c.fillText(hist.length + ' 轮', w - padR, h - padB + 4);
+  }
+
+  /** 错分去向：比单纯列准确率有用得多 —— 能看出是哪两类在互相混 */
+  function matrixHtml(conf) {
     var rows = [];
     for (var g = 1; g < NC; g++) {
-      var tot = 0, hit = r.conf[g][g];
-      for (var p = 0; p < NC; p++) tot += r.conf[g][p];
+      var tot = 0, p;
+      for (p = 0; p < NC; p++) tot += conf[g][p];
       if (!tot) continue;
-      if (hit < tot) rows.push({ idx: g, hit: hit, tot: tot, rate: hit / tot });
+      var miss = tot - conf[g][g];
+      if (!miss) continue;
+      var dest = [];
+      for (p = 0; p < NC; p++) if (p !== g && conf[g][p]) dest.push({ p: p, n: conf[g][p] });
+      dest.sort(function (a, b) { return b.n - a.n; });
+      rows.push({ g: g, tot: tot, miss: miss, top: dest[0] || null });
     }
-    rows.sort(function (a, b) { return a.rate - b.rate; });
+    if (!rows.length) return '<div class="muted tiny mt6">没有错分的格子</div>';
+    rows.sort(function (a, b) { return (b.miss / b.tot) - (a.miss / a.tot); });
 
+    var html = '<div class="muted tiny" style="margin-top:8px">错分去向（容易混的在前）：</div>' +
+      '<table class="matrix"><tr><th style="text-align:left">真实 → 最常错认成</th><th>错/总</th></tr>';
+    rows.slice(0, 8).forEach(function (x) {
+      html += '<tr><td style="text-align:left">' + CLASSES[x.g].g + ' ' + CLASSES[x.g].id +
+        (x.top ? ' <span class="muted">→ ' + CLASSES[x.top.p].g + ' ' + CLASSES[x.top.p].id +
+          ' ×' + x.top.n + '</span>' : '') +
+        '</td><td class="err">' + x.miss + '/' + x.tot + '</td></tr>';
+    });
+    html += '</table>';
+    return html;
+  }
+
+  function renderEval(r, secondsPerEpoch, totalSeconds) {
     var html =
       '<div class="statline"><span>验证集准确率</span><b class="big">' + fmt(r.acc * 100, 2) + '%</b></div>' +
       '<div class="statline"><span>非空格子准确率</span><b class="big">' + fmt(r.deepAcc * 100, 2) + '%</b></div>' +
       '<div class="statline"><span>验证切片</span><b>' + r.n + '（非空 ' + r.deepTotal + '）</b></div>' +
       '<div class="statline"><span>训练耗时</span><b>' + fmt(totalSeconds, 0) + 's</b></div>' +
-      '<div class="statline"><span>每轮耗时</span><b>' + fmt(secondsPerEpoch, 2) + 's</b></div>';
+      '<div class="statline"><span>每轮耗时</span><b>' + fmt(secondsPerEpoch, 2) + 's</b></div>' +
+      matrixHtml(r.conf);
 
-    if (rows.length) {
-      html += '<div class="muted tiny" style="margin-top:8px">未完全命中的类别：</div><table>' +
-        rows.slice(0, 10).map(function (x) {
-          return '<tr><td>' + CLASSES[x.idx].g + '　' + CLASSES[x.idx].id +
-            '</td><td>' + x.hit + '/' + x.tot + '</td></tr>';
-        }).join('') + '</table>';
-    } else {
-      html += '<div class="muted tiny mt6">所有出现过的类别全部命中</div>';
-    }
     $('evalStat').innerHTML = html;
     $('resultCard').hidden = false;
   }
+
+  // ---------------------------------------------------------------- 逐图回测
+  // 不只给一个准确率：逐张列出错了几格，并且把「训练见过的图」和「验证图」分开统计。
+  // 两组差得越多，说明模型越是在背答案而不是真认识棋子。
+
+  function gotoBacktest(key) {
+    var i = -1;
+    for (var k = 0; k < samples.length; k++) if (samples[k].key === key) { i = k; break; }
+    if (i < 0) return;
+    current = i;
+    mode = 'paint';
+    showPred = !!backtest[key];
+    lastPred = backtest[key] ? backtest[key].pred : null;
+    updateModeButtons();
+    showTab('annotate');
+    renderStage();
+    renderSamples();
+  }
+
+  $('btnBacktest').addEventListener('click', async function () {
+    var u = usable();
+    if (!u.length) { toast('先在「样本」里标定并标注一些图'); return; }
+    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+
+    var btn = $('btnBacktest');
+    btn.disabled = true;
+    if (native()) native().keepAwake(true);
+
+    backtest = {};
+    var rows = [];
+    // 训练图 vs 验证图分开记
+    var g = {
+      train: { cells: 0, wrong: 0, neTotal: 0, neWrong: 0 },
+      val: { cells: 0, wrong: 0, neTotal: 0, neWrong: 0 }
+    };
+    var conf = [];
+    for (var z = 0; z < NC; z++) conf.push(new Int32Array(NC));
+
+    try {
+      for (var i = 0; i < u.length; i++) {
+        var s = u[i];
+        var pred = await predictCells(s, inSize);
+        var d = diffOf(s, pred);
+        backtest[s.key] = { pred: pred, diff: d };
+
+        var grp = valKeys[s.key] ? g.val : g.train;
+        grp.cells += CELLS;
+        grp.wrong += d.diff.length;
+        grp.neWrong += d.wrongNonEmpty;
+        for (var c = 0; c < CELLS; c++) {
+          var truth = s.cells[c];
+          if (truth > 0) { grp.neTotal++; }
+          conf[truth][pred[c]]++;
+        }
+        rows.push({
+          key: s.key, name: s.name, thumb: s.thumb,
+          wrong: d.diff.length, wrongNE: d.wrongNonEmpty,
+          isVal: !!valKeys[s.key]
+        });
+
+        btn.textContent = '回测中… ' + (i + 1) + '/' + u.length;
+        if (i % 3 === 2) await yieldTick();
+      }
+    } catch (e) {
+      log('回测失败 ' + e.message);
+      toast('回测失败：' + e.message);
+      btn.disabled = false; btn.textContent = '逐图回测';
+      if (native()) native().keepAwake(false);
+      return;
+    }
+
+    if (native()) native().keepAwake(false);
+    btn.disabled = false; btn.textContent = '逐图回测';
+
+    rows.sort(function (a, b) { return b.wrong - a.wrong || b.wrongNE - a.wrongNE; });
+
+    var pct = function (w, t) { return t ? (1 - w / t) * 100 : 0; };
+    var trainAcc = pct(g.train.wrong, g.train.cells);
+    var valAcc = pct(g.val.wrong, g.val.cells);
+    var gap = trainAcc - valAcc;
+
+    var verdict, vclass;
+    if (g.train.cells && g.val.cells) {
+      if (gap > 8) { verdict = '训练图明显好于验证图（差 ' + fmt(gap, 1) + ' 个点）—— 有过拟合迹象，加图 或 减少轮数'; vclass = 'predbadge'; }
+      else if (gap > 3) { verdict = '训练图略好于验证图（差 ' + fmt(gap, 1) + ' 个点），属正常范围'; vclass = 'predok'; }
+      else { verdict = '两组基本一致，没有明显过拟合'; vclass = 'predok'; }
+    } else {
+      verdict = '这次回测只有一组图（另一组为空）'; vclass = 'predok';
+    }
+
+    $('backtestSummary').innerHTML =
+      '<div class="statline"><span>验证图准确率</span><b class="big">' +
+      (g.val.cells ? fmt(valAcc, 2) + '%' : '—') + '</b></div>' +
+      '<div class="statline"><span>训练图准确率</span><b>' +
+      (g.train.cells ? fmt(trainAcc, 2) + '%' : '—') + '</b></div>' +
+      '<div class="statline"><span>非空格子准确率</span><b>' +
+      fmt(pct(g.train.neWrong + g.val.neWrong, g.train.neTotal + g.val.neTotal), 2) + '%</b></div>' +
+      '<div class="statline"><span>回测范围</span><b>' + u.length + ' 张已标注图</b></div>' +
+      '<div class="mt8 tiny"><span class="' + vclass + '">' + verdict + '</span></div>' +
+      matrixHtml(conf);
+
+    $('backtestList').innerHTML = rows.map(function (r) {
+      var cls = r.wrong === 0 ? 'good' : (r.wrong <= 3 ? 'mid' : 'bad');
+      return '<div class="bt-row ' + cls + '" data-key="' + escapeHtml(r.key) + '">' +
+        '<img class="sw" src="' + r.thumb + '" alt="">' +
+        '<span class="nm">' + escapeHtml(r.name) +
+        (r.isVal ? ' <span class="muted">·验证图</span>' : '') + '</span>' +
+        '<span class="bd">' + r.wrong + ' 错</span></div>';
+    }).join('');
+    $('backtestCard').hidden = false;
+
+    Array.prototype.forEach.call($('backtestList').querySelectorAll('.bt-row'), function (el) {
+      el.addEventListener('click', function () { gotoBacktest(el.dataset.key); });
+    });
+
+    log('逐图回测：验证图 ' + (g.val.cells ? fmt(valAcc, 2) + '%' : '—') +
+        ' · 训练图 ' + (g.train.cells ? fmt(trainAcc, 2) + '%' : '—'));
+  });
 
   $('btnStop').addEventListener('click', function () {
     stopFlag = true;
@@ -1205,6 +1597,10 @@
 
     if (model) { model.dispose(); model = null; }
     model = buildModel(size);
+    backtest = {};          // 模型换了，之前的回测结果不再成立
+    showPred = false;
+    lastPred = null;
+    $('backtestCard').hidden = true;
     var params = 0;
     model.layers.forEach(function (l) { l.getWeights().forEach(function (w) { params += w.size; }); });
     log('模型参数量 ' + params.toLocaleString() + ' · 输入 ' + size + '×' + size + ' · 类别 ' + NC);
@@ -1212,6 +1608,7 @@
     var opt = tf.train.adam(1e-3);
     var t0 = performance.now();
     var firstEpoch = 0, lastEpoch = 0;
+    var lossHist = [];
 
     for (var ep = 0; ep < epochs && !stopFlag; ep++) {
       var idx = shuffledIdx();
@@ -1235,6 +1632,7 @@
       var epMs = performance.now() - epStart;
       if (ep === 0) firstEpoch = epMs;
       lastEpoch = epMs;
+      lossHist.push(lossSum / Math.max(1, batches));
 
       $('trainProg').style.width = ((ep + 1) / epochs * 100) + '%';
       $('trainStat').innerHTML = '第 ' + (ep + 1) + '/' + epochs + ' 轮 · loss <b>' +
@@ -1246,6 +1644,7 @@
 
     var total = (performance.now() - t0) / 1000;
     $('trainStat').innerHTML += '<br><span class="muted">训练结束，共 ' + fmt(total, 0) + 's</span>';
+    drawLossCurve(lossHist);
     log('训练结束，用时 ' + fmt(total, 1) + 's');
 
     try {
@@ -1256,6 +1655,15 @@
         log('验证准确率 ' + fmt(r.acc * 100, 2) + '% · 非空 ' + fmt(r.deepAcc * 100, 2) + '%');
         currentMeta = '验证集 ' + fmt(r.acc * 100, 1) + '% / 非空 ' + fmt(r.deepAcc * 100, 1) +
           '% · 样本 ' + usable().length + ' 张 · ' + epochs + ' 轮';
+      }
+
+      // 自动留一份：不然关掉应用模型就没了，隔天想回测还得重训
+      try {
+        await saveModelToDb(AUTO_MODEL_NAME, { desc: currentMeta });
+        await refreshSavedModels();
+        log('已自动保存本次训练结果，可在「模型」页重新载入');
+      } catch (e2) {
+        log('自动保存失败：' + e2.message);
       }
     } catch (e) {
       log('评估失败 ' + e.message);
@@ -1268,73 +1676,9 @@
     $('trainProg').style.width = '100%';
   });
 
-  // ---------------------------------------------------------------- 保存模型
-  $('btnSaveModel').addEventListener('click', async function () {
-    if (!model) { toast('还没有训练好的模型'); return; }
-    $('btnSaveModel').disabled = true;
-    try {
-      var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 13);
-      var base = 'jieqi-cells-' + inSize + '-' + stamp;
-      var saved = { json: null, bin: null, weights: 0 };
+  // ---------------------------------------------------------------- 保存 / 导出
 
-      await model.save(tf.io.withSaveHandler(async function (artifacts) {
-        var meta = {
-          format: 'layers-model',
-          generatedBy: 'JieqiBox Model Studio',
-          convertedBy: null,
-          modelTopology: artifacts.modelTopology,
-          weightSpecs: artifacts.weightSpecs,
-          userData: {
-            labels: LABEL_IDS,
-            inputSize: inSize,
-            grid: { cols: COLS, rows: ROWS },
-            cropK: CROP_K,
-            note: '逐格分类器：输入为以交叉点为中心的方格裁切，输出 logits（推理时需 softmax）'
-          }
-        };
-        var weightBuf = artifacts.weightData;
-        if (weightBuf instanceof ArrayBuffer) {
-          meta.weightsManifest = [{
-            paths: [base + '.bin'],
-            weights: artifacts.weightSpecs
-          }];
-        }
-        saved.json = JSON.stringify(meta);
-        saved.bin = weightBuf;
-        saved.weights = weightBuf.byteLength;
-      }));
-
-      var nat = native();
-      var where;
-      if (nat) {
-        where = nat.saveFile(base + '.bin', abToBase64(saved.bin));
-        var r2 = nat.saveFile(base + '.json', strToBase64(saved.json));
-        if (String(where).indexOf('ERROR') === 0) throw new Error(where);
-        where = String(where).replace(/[^/]*$/, '');
-      } else {
-        // 浏览器预览模式：直接下载
-        downloadBlob(new Blob([saved.bin]), base + '.bin');
-        downloadBlob(new Blob([saved.json], { type: 'application/json' }), base + '.json');
-        where = '下载目录';
-      }
-
-      var meta = {
-        name: base, size: inSize, labels: NC,
-        bytes: saved.weights, at: Date.now(),
-        description: currentMeta
-      };
-      modelMeta.unshift(meta);
-      localStorage.setItem('studio.models', JSON.stringify(modelMeta.slice(0, 50)));
-
-      log('模型已导出：' + base + '.json / .bin（' + fmt(saved.weights / 1024, 0) + ' KB 权重）');
-      toast('已保存到 ' + where, 2800);
-      renderModels();
-    } catch (e) {
-      log('保存失败 ' + e.message);
-      toast('保存失败：' + e.message);
-    }
-    $('btnSaveModel').disabled = false;
-  });
+  var currentMeta = null;
 
   function downloadBlob(blob, name) {
     var a = document.createElement('a');
@@ -1344,24 +1688,60 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
   }
 
-  var modelMeta = [];
-  var currentMeta = null;
-
-  function renderModels() {
-    var el = $('modelList');
-    try { modelMeta = JSON.parse(localStorage.getItem('studio.models') || '[]'); } catch (e) { modelMeta = []; }
-    if (!modelMeta.length) {
-      el.innerHTML = '<span class="muted">还没有保存过模型。训练后点「保存模型」，文件会写进「下载/模型工坊」。</span>';
-      return;
-    }
-    el.innerHTML = modelMeta.map(function (m) {
-      return '<div class="m"><div><b>' + escapeHtml(m.name) + '</b></div>' +
-        '<div class="muted tiny">输入 ' + m.size + '×' + m.size + ' · ' + m.labels + ' 类 · ' +
-        fmt(m.bytes / 1024, 0) + ' KB · ' + new Date(m.at).toLocaleString() + '</div>' +
-        (m.description ? '<div class="muted tiny">' + escapeHtml(m.description) + '</div>' : '') +
-        '</div>';
-    }).join('');
+  /** 把库里的模型记录拼成 TF.js layers-model 的 json + bin */
+  function buildExport(rec) {
+    var base = rec.name;
+    var json = {
+      format: 'layers-model',
+      generatedBy: 'JieqiBox Model Studio',
+      convertedBy: null,
+      modelTopology: rec.modelTopology,
+      weightSpecs: rec.weightSpecs,
+      weightsManifest: [{ paths: [base + '.bin'], weights: rec.weightSpecs }],
+      userData: {
+        labels: rec.classIds,
+        inputSize: rec.size,
+        grid: rec.grid,
+        cropK: rec.cropK,
+        note: '逐格分类器：输入为以交叉点为中心的方格裁切，输出 logits（推理时需 softmax）'
+      }
+    };
+    return { json: JSON.stringify(json), bin: rec.weightData, base: base };
   }
+
+  function exportModelRecord(rec) {
+    var e = buildExport(rec);
+    var nat = native();
+    if (nat) {
+      var r = nat.saveFile(e.base + '.bin', abToBase64(e.bin));
+      if (String(r).indexOf('ERROR') === 0) { toast('导出失败：' + r); return; }
+      nat.saveFile(e.base + '.json', strToBase64(e.json));
+      var dir = String(r).replace(/[^/]*$/, '');
+      log('已导出 ' + e.base + '.json / .bin（' + fmt(e.bin.byteLength / 1024, 0) + ' KB 权重）');
+      toast('已导出到 ' + dir, 2800);
+    } else {
+      downloadBlob(new Blob([e.bin]), e.base + '.bin');
+      downloadBlob(new Blob([e.json], { type: 'application/json' }), e.base + '.json');
+      toast('已导出到下载目录');
+    }
+  }
+
+  $('btnSaveModel').addEventListener('click', async function () {
+    if (!model) { toast('还没有训练好的模型'); return; }
+    $('btnSaveModel').disabled = true;
+    try {
+      var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 13);
+      var name = 'jieqi-cells-' + inSize + '-' + stamp;
+      var rec = await saveModelToDb(name, { desc: currentMeta });
+      await refreshSavedModels();
+      exportModelRecord(rec);
+      log('模型已存进应用：' + name + '（可在「模型」页随时载入回测）');
+    } catch (e) {
+      log('保存失败 ' + e.message);
+      toast('保存失败：' + e.message);
+    }
+    $('btnSaveModel').disabled = false;
+  });
 
   // 轻量调试出口：出问题时可在控制台核对取景与命中，不影响正常使用
   window.__studio = {
@@ -1376,6 +1756,11 @@
       };
     },
     hit: function (lx, ly) { return cellAt(toImage({ x: lx, y: ly })); },
+    findKey: function (key) {
+      for (var k = 0; k < samples.length; k++) if (samples[k].key === key) return k;
+      return -1;
+    },
+    sampleKeys: function () { return samples.slice(0, 5).map(function (s) { return s.key; }); },
     imagePoint: function (lx, ly) { return toImage({ x: lx, y: ly }); },
     paint: function (lx, ly) { paintAt(toImage({ x: lx, y: ly })); }
   };
@@ -1406,7 +1791,9 @@
 
     try {
       var all = await dbAll();
-      samples = (all || []).sort(function (a, b) { return a.key < b.key ? -1 : 1; });
+      // 模型记录和样本共用一个 store，靠 key 前缀区分
+      samples = (all || []).filter(function (r) { return !isModelRecord(r); })
+        .sort(function (a, b) { return a.key < b.key ? -1 : 1; });
       log('从本地读回 ' + samples.length + ' 张样本');
     } catch (e) {
       log('读取本地样本失败：' + e.message);
@@ -1415,7 +1802,7 @@
     current = samples.length ? 0 : -1;
     renderSamples();
     refreshTrainTab();
-    renderModels();
+    refreshSavedModels();
 
     window.addEventListener('resize', function () { if ($('tab-annotate').classList.contains('on')) renderStage(); });
   }

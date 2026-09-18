@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=8">
+<link rel="stylesheet" href="studio.css?v=12">
 </head>
 <body>
 
@@ -61,6 +61,7 @@
         <button id="btnAuto">自动校正</button>
         <button id="btnNudge">微调</button>
         <button id="btnCopyPrev">复制上局</button>
+        <button id="btnCheckModel">用模型检查</button>
         <button id="btnClearCells" class="danger-ghost">清空格子</button>
       </div>
       <div class="row mt8">
@@ -114,9 +115,18 @@
   <div class="card" id="resultCard" hidden>
     <h2>结果</h2>
     <div id="evalStat"></div>
+    <canvas id="lossCurve" height="120" hidden></canvas>
     <div class="row mt8">
       <button id="btnSaveModel" class="primary">保存模型</button>
+      <button id="btnBacktest">逐图回测</button>
     </div>
+  </div>
+
+  <div class="card" id="backtestCard" hidden>
+    <h2>逐图回测</h2>
+    <div id="backtestSummary" class="muted">—</div>
+    <div id="backtestList" class="bt-list"></div>
+    <div class="muted tiny mt8">点任意一行会跳到那张图并叠加显示模型预测（错的格子标红）。</div>
   </div>
 
   <div class="card">
@@ -142,7 +152,7 @@
 <div id="toast" class="toast"></div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=8"></script>
-<script src="studio.js?v=8"></script>
+<script src="lattice.js?v=12"></script>
+<script src="studio.js?v=12"></script>
 </body>
 </html>

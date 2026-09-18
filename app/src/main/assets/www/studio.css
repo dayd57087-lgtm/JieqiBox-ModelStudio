@@ -102,3 +102,31 @@ td:last-child{text-align:right;color:var(--dim)}
 
 #modelList .m{border-bottom:1px solid var(--line);padding:8px 0}
 #modelList .m:last-child{border-bottom:0}
+
+.tag{background:var(--accent);color:#fff;border-radius:5px;padding:1px 6px;font-size:10px;
+  font-weight:600;vertical-align:1px}
+
+#lossCurve{width:100%;height:120px;display:block;background:#0c0e11;border-radius:8px;margin-top:8px}
+
+.bt-list{max-height:260px;overflow:auto;margin-top:6px}
+.bt-row{display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--line);
+  font-size:12px;cursor:pointer}
+.bt-row:last-child{border-bottom:0}
+.bt-row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bt-row .bd{font-weight:600;font-family:ui-monospace,monospace}
+.bt-row.good .bd{color:var(--ok)}
+.bt-row.mid .bd{color:var(--warn,#ffb020)}
+.bt-row.bad .bd{color:var(--red)}
+.bt-row .sw{width:34px;height:22px;border-radius:4px;object-fit:cover;background:#000;flex:0 0 auto}
+
+.matrix{font-size:10px;border-collapse:collapse;width:100%;margin-top:6px}
+.matrix td,.matrix th{padding:2px 3px;border:0;text-align:center;color:var(--dim)}
+.matrix th{color:var(--dim);font-weight:500}
+.matrix td.hit{color:var(--ok);font-weight:600}
+.matrix td.err{color:var(--red);font-weight:700;background:rgba(224,82,82,.16);border-radius:4px}
+.matrix td.zero{color:#454b55}
+
+.predbadge{display:inline-block;background:rgba(224,82,82,.2);color:#ff9090;border-radius:5px;
+  padding:1px 6px;font-size:10px;font-weight:600}
+.predok{display:inline-block;background:rgba(53,196,106,.18);color:#6cdc93;border-radius:5px;
+  padding:1px 6px;font-size:10px;font-weight:600}
