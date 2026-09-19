@@ -1584,10 +1584,15 @@
     sctx.drawImage(stageImg, 0, 0);
     if (s.lattice) {
       drawLattice(s.lattice, S);
-      if (showPred && lastPred) drawPredMarks(s, lastPred, S);
-      else drawMarkers(s, S);
+      if (showPred && lastPred) {
+        // 核对模式：只画「模型预测 vs 你的标注」的差异。
+        // 不画阵营色圈，也不画修正痕迹 —— 三种标记叠在一起就没法看了。
+        drawPredMarks(s, lastPred, S);
+      } else {
+        drawMarkers(s, S);
+        drawFixed(s, S);
+      }
       drawPins(s, S);
-      drawFixed(s, S);
     }
     if (mode === 'draw' && drawStart && drawNow) drawRough(drawStart, drawNow, S);
     sctx.restore();
@@ -1600,9 +1605,9 @@
     if (showPred && lastPred) {
       var dd = diffOf(s, lastPred);
       hint.textContent = dd.diff.length === 0
-        ? '模型预测与标注完全一致 ✓'
-        : ('模型预测有 ' + dd.diff.length + ' 格不符（其中非空 ' + dd.wrongNonEmpty +
-           ' 格）· 紫圈=模型判错，改对它即可（改动会被记为修正样本）');
+        ? '这张图模型全对 ✓　点上面的「改标注」可以继续编辑'
+        : ('只显示判错的 ' + dd.diff.length + ' 处 · 紫圈=要让它重点学，'
+           + '点一下可点掉；要改标注请点上面的「改标注」');
     } else {
       hint.textContent = mode === 'draw'
         ? '在棋盘外沿拖一个框，大致圈住九路十行即可，会自动精修'
@@ -1716,9 +1721,10 @@
   }
 
   /**
-   * 标出人工修正过的格子。
-   * 用中空小方块而不是填充色 —— 阵营色已经占了三种颜色，
-   * 再加一种填充色只会更乱；中空形状和它们不冲突。
+   * 标注模式下，给「已列入待学清单」的格子做个小记号。
+   *
+   * 画成右上角一个很小的紫点 —— 不能再用大圈或大菱形，
+   * 那会盖住棋子本身，看起来就像「标注和修正混在一起」。
    */
   function drawFixed(s, S) {
     if (!s.lattice || !s.fixed) return;
@@ -1726,18 +1732,21 @@
     var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
     var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
     var R = Math.min(dx, dy) * 0.34;
+    var dot = Math.max(2.2, Math.min(dx, dy) * 0.09);
     for (var r = 0; r < ROWS; r++) {
       for (var c = 0; c < COLS; c++) {
         var i = r * COLS + c;
         if (!s.fixed[i]) continue;
-        var cx = x0 + c * dx, cy = y0 + r * dy;
-        sctx.save();
-        sctx.translate(cx, cy);
-        sctx.rotate(Math.PI / 4);
-        sctx.strokeStyle = '#7b5cff';
-        sctx.lineWidth = 2.4 / S;
-        sctx.strokeRect(-R * 0.78, -R * 0.78, R * 1.56, R * 1.56);
-        sctx.restore();
+        // 右上角，压在格子边缘上，不碰中间的棋子
+        var px = x0 + c * dx + R * 0.86;
+        var py = y0 + r * dy - R * 0.86;
+        sctx.beginPath();
+        sctx.arc(px, py, dot, 0, Math.PI * 2);
+        sctx.fillStyle = '#7b5cff';
+        sctx.fill();
+        sctx.lineWidth = 1.4 / S;
+        sctx.strokeStyle = 'rgba(10,12,15,.85)';
+        sctx.stroke();
       }
     }
   }
@@ -1775,12 +1784,14 @@
   /**
    * 对比模式：叠加显示模型的预测，并标出判错的格子。
    *
-   * 配色刻意避开阵营色（红/青/琥珀），改用绿与紫 ——
-   * 否则「模型判错的紫圈」会和「红方的洋红圈」糊在一起，
-   * 而对比模式恰恰是最需要一眼分清"标记"与"棋子"的时候。
+   * **只画判错的格子。**
    *
-   *   绿 = 模型与标注一致
-   *   紫 = 模型判错（圈里写的是模型认为的子）
+   * 判对的也画上圈的话，整块棋盘都是圈 —— 和标注模式的阵营色圈看起来一样花，
+   * 用户仍然会觉得"混在一起"。核对的目的是找到错处，那就只显示错处。
+   *
+   * 配色用紫，刻意避开阵营色（红/青/琥珀），一眼就能和棋子本身区分开：
+   *   亮紫实线 = 模型判错，已列入待学清单
+   *   暗紫虚线 = 模型判错，但你已点掉（不学这处）
    */
   function drawPredMarks(s, pred, S) {
     var IW = view.imgW, IH = view.imgH;
@@ -1793,18 +1804,26 @@
         var i = r * COLS + c;
         var truth = s.cells ? s.cells[i] : 0;
         var p = pred[i];
-        var wrong = p !== truth;
-        if (p === 0 && !wrong) continue;      // 两边都是空，没什么可看的
+        if (p === truth) continue;            // 判对了就不画 —— 只显示错处
+        var wrong = true;
 
         var cx = x0 + c * dx, cy = y0 + r * dy;
+        // 判错的格再看它有没有被列入待学清单：
+        // 列入 = 亮紫实线（要学的），点掉的 = 暗灰虚线（跳过）
+        var inList = s.fixed && s.fixed[i];
         sctx.beginPath();
         sctx.arc(cx, cy, R, 0, Math.PI * 2);
-        sctx.fillStyle = 'rgba(8,10,14,' + (wrong ? 0.62 : 0.42) + ')';
+        sctx.fillStyle = 'rgba(8,10,14,' +
+          (wrong ? (inList ? 0.62 : 0.45) : 0.42) + ')';
         sctx.fill();
-        sctx.lineWidth = (wrong ? 3 : 1.6) / S;
-        sctx.strokeStyle = wrong ? '#7b5cff' : '#3fbf74';
+        if (wrong && !inList) {
+          sctx.setLineDash([3.5 / S, 3 / S]);
+        }
+        sctx.lineWidth = (wrong ? (inList ? 3 : 2) : 1.6) / S;
+        sctx.strokeStyle = wrong ? (inList ? '#7b5cff' : '#5a5570') : '#3fbf74';
         sctx.stroke();
-        sctx.fillStyle = wrong ? '#b9a6ff' : '#6cdc93';
+        sctx.setLineDash([]);
+        sctx.fillStyle = wrong ? (inList ? '#b9a6ff' : '#8b86a0') : '#6cdc93';
         sctx.font = 'bold ' + Math.round(R * 1.12) + 'px "PingFang SC",serif';
         sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
         sctx.fillText(p === 0 ? '空' : CLASSES[p].g, cx, cy);
@@ -1826,6 +1845,26 @@
         if (s.auto && s.auto[i]) counts.auto++;
       }
     }
+    // 核对模式下先说明差异是什么，避免和标注混淆
+    if (showPred && lastPred) {
+      var dd0 = diffOf(s, lastPred);
+      var fx = fixedCount(s);
+      // 数字统一口径：diffOf 是当前实际的差异数，fx 是其中被列入清单的。
+      // 之前图例用 fixedCount（历史遗留的清单），提示条用 diffOf，
+      // 两处会显示不同的数 —— 用户看到的两个数字必须是一回事。
+      if (!dd0.diff.length) {
+        el.innerHTML = '<span class="lg" style="border-color:#3fbf74;color:#3fbf74">' +
+          '没有判错的地方 ✓</span>';
+        return;
+      }
+      el.innerHTML =
+        '<span class="lg warn"><i style="background:#7b5cff"></i>待学 ' + fx +
+        ' / ' + dd0.diff.length + ' 处</span>' +
+        (dd0.diff.length - fx > 0
+          ? '<span class="lg"><i style="background:#5a5570"></i>已跳过 ' +
+            (dd0.diff.length - fx) + ' 处</span>' : '');
+      return;
+    }
     var parts = [];
     if (counts.r) parts.push('<span class="lg"><i style="background:' + COLOR_RED +
       '"></i>红方 ' + counts.r + '</span>');
@@ -1835,6 +1874,9 @@
       '"></i>暗子 ' + counts.d + '</span>');
     if (counts.auto) parts.push('<span class="lg warn"><i style="background:' + COLOR_DARK +
       '"></i>模型猜 ' + counts.auto + ' · 待核对</span>');
+    var fx2 = fixedCount(s);
+    if (fx2) parts.push('<span class="lg"><i style="background:#7b5cff"></i>待学 ' +
+      fx2 + ' 处</span>');
     if (!parts.length) parts.push('<span class="lg">还没有标注</span>');
     el.innerHTML = parts.join('');
   }
@@ -2024,15 +2066,72 @@
       renderSamples();
       return idx;
     }
+    /*
+     * 核对模式（正在看模型预测）：点格子只是切换「这处要不要让模型重点学」，
+     * **绝不改标注**。
+     *
+     * 以前这里跟标注模式走同一条路径，于是核对时点一下格子，实际改掉的是
+     * 自己的标注 —— 这正是「我修改的棋子会影响标注的棋子」的原因。
+     * 修正和标注是两件事，必须分开。
+     */
+    if (showPred && lastPred) {
+      toggleFixTarget(s, idx);
+      return idx;
+    }
+
     s.cells = s.cells || new Array(CELLS).fill(0);
     s.cells[idx] = (s.cells[idx] === brush) ? 0 : brush;   // 同笔刷再点 = 擦掉
     // 人手点过这一格，就不再是「模型猜的」，虚线环随之变成实线
     if (s.auto) s.auto[idx] = 0;
-    markFixed(s, idx);
     lastCell = idx;
     queueSave(s);
     renderStage();
     return idx;
+  }
+
+  /**
+   * 切换某一格的「重点学」状态。只动 s.fixed，不碰 s.cells。
+   */
+  function toggleFixTarget(s, idx) {
+    s.fixed = s.fixed || new Array(CELLS).fill(0);
+    s.skip = s.skip || new Array(CELLS).fill(0);
+    var on = !s.fixed[idx];
+    s.fixed[idx] = on ? 1 : 0;
+    // 记下「用户主动跳过」—— 下次进入核对重算清单时不该再自动选上
+    s.skip[idx] = on ? 0 : 1;
+    queueSave(s);
+    renderStage();
+    renderSamples();
+  }
+
+  /**
+   * 进入核对模式时，把所有差异自动纳入待学清单。
+   *
+   * 默认全选是为了省事 —— 差异本来就是「模型判错的地方」，
+   * 用户只需要把其中「其实是自己标错了」的那几格点掉。
+   * 已经有清单时不动，避免覆盖用户刚做的调整。
+   */
+  function buildFixList(s) {
+    if (!lastPred) return 0;
+    /*
+     * 每次进入核对都按**当前模型**重算清单。
+     *
+     * 不能沿用旧清单：它是模型还是上一版时生成的，模型一换就过期了 ——
+     * 实测出现过「清单里 6 条，其中 2 条其实已经不是错误」，
+     * 用户看到两个不一致的数字，也不知道该信哪个。
+     *
+     * 但用户手动点掉的选择要保留（记录在 s.skip 里），
+     * 否则每次进来都得重新点掉同一批。
+     */
+    s.skip = s.skip || new Array(CELLS).fill(0);
+    s.fixed = new Array(CELLS).fill(0);
+    var n = 0;
+    for (var i = 0; i < CELLS; i++) {
+      var truth = s.cells ? s.cells[i] : 0;
+      if (lastPred[i] === truth) { s.skip[i] = 0; continue; }  // 不再是错误，清掉跳过记录
+      if (!s.skip[i]) { s.fixed[i] = 1; n++; }
+    }
+    return n;
   }
 
   /**
@@ -2042,15 +2141,6 @@
    * 那个界面的语义就是"我在核对模型错在哪"，此时改动基本都是在改错。
    * 普通标注（没有预测可对比）不算修正，只算人工标注。
    */
-  function markFixed(s, idx) {
-    var pred = lastPred;
-    if (!pred || !showPred) {
-      if (s.fixed && s.fixed[idx]) s.fixed[idx] = 0;
-      return;
-    }
-    s.fixed = s.fixed || new Array(CELLS).fill(0);
-    s.fixed[idx] = (s.cells[idx] === pred[idx]) ? 0 : 1;
-  }
 
   /** 一张图上有多少格是人工修正过的 */
   function fixedCount(s) {
@@ -2225,7 +2315,8 @@
     return {
       key: s.key, name: s.name, w: s.w, h: s.h, thumb: s.thumb, blob: s.blob,
       lattice: s.lattice, cells: s.cells, conf: s.conf,
-      auto: s.auto, src: s.src, pins: s.pins, fixed: s.fixed
+      auto: s.auto, src: s.src, pins: s.pins,
+      fixed: s.fixed, skip: s.skip
     };
   }
 
@@ -2364,7 +2455,12 @@
     if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
     if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
 
-    if (showPred) { showPred = false; renderStage(); return; }
+    if (showPred) {
+      showPred = false;
+      updateCompareBar();
+      renderStage();
+      return;
+    }
 
     if (backtest[s.key]) {
       lastPred = backtest[s.key].pred;
@@ -2385,7 +2481,28 @@
       $('btnCheckModel').textContent = '用模型检查';
     }
     showPred = true;
+    // 进入核对就自动生成待学清单（已有清单则保留用户的选择）
+    var n = buildFixList(s);
+    queueSave(s);
+    updateCompareBar();
     renderStage();
+    renderSamples();
+    log('核对「' + s.name + '」：' + n + ' 处与标注不一致，已列入待学清单');
+    toast('发现 ' + n + ' 处判错。点紫色格子可以点掉（表示这处不用学）', 3200);
+  });
+
+  /** 核对模式下才显示那条「改标注」提示栏 */
+  function updateCompareBar() {
+    var bar = $('compareBar');
+    if (bar) bar.hidden = !showPred;
+    $('btnCheckModel').classList.toggle('on', showPred);
+  }
+
+  $('btnExitCompare').addEventListener('click', function () {
+    showPred = false;
+    updateCompareBar();
+    renderStage();
+    toast('已切到标注模式 —— 现在点格子才是改标注', 2600);
   });
 
   $('btnClearCells').addEventListener('click', function () {
@@ -3690,10 +3807,12 @@
         for (var i = 0; i < CELLS; i++) {
           if (sm.fixed[i]) { sm.fixed[i] = 0; cleared++; }
         }
+        // 跳过记录也一并清掉：这轮已经学完了，下一轮该重新看一遍
+        if (sm.skip) for (var j = 0; j < CELLS; j++) sm.skip[j] = 0;
       });
       if (cleared) {
         await Promise.all(samples.map(function (sm) { return dbPut(toRecord(sm)); }));
-        log('已清掉 ' + cleared + ' 处修正标记（它们已经学进模型了）');
+        log('已重置 ' + cleared + ' 处待学标记（它们已经学进模型了）');
       }
 
       drawLossCurve(lossHist, valHist);
@@ -3702,7 +3821,8 @@
       renderSamples();
       refreshFinetunePanel();
       renderHome();
-      toast('微调完成：修正的格子学对 ' + after + '/' + fixIdx.length, 3600);
+      toast('微调完成：' + after + '/' + fixIdx.length + ' 格学对。'
+            + '待学清单已重置，下次核对会重新列出模型的判错。', 4200);
     } catch (e) {
       log('微调失败：' + e.message);
       toast('微调失败：' + e.message);
@@ -3956,8 +4076,29 @@
       var s = currentSample();
       return s ? {
         cells: s.cells ? Array.from(s.cells) : null,
-        auto: s.auto ? Array.from(s.auto) : null
+        auto: s.auto ? Array.from(s.auto) : null,
+        fixed: s.fixed ? Array.from(s.fixed) : null,
+        skip: s.skip ? Array.from(s.skip) : null,
+        pred: lastPred ? Array.from(lastPred) : null
       } : null;
+    },
+    /** 测试用：模拟点一下某一格（走真实的命中与落子路径） */
+    tapCell: function (idx) {
+      var s = currentSample();
+      if (!s || !s.lattice) return -1;
+      var r = Math.floor(idx / COLS), c = idx % COLS;
+      var IW = view.imgW, IH = view.imgH;
+      var S = view.fit * view.zoom;
+      var cx = (s.lattice.x0 + c * s.lattice.dx) * IW * S + view.panX;
+      var cy = (s.lattice.y0 + r * s.lattice.dy) * IH * S + view.panY;
+      return paintAt(toImage({ x: cx, y: cy }));
+    },
+    /** 测试用：直接调用 toggleFixTarget */
+    toggleFix: function (idx) {
+      var s = currentSample();
+      if (!s) return -1;
+      toggleFixTarget(s, idx);
+      return s.fixed[idx];
     },
     findKey: function (key) {
       for (var k = 0; k < samples.length; k++) if (samples[k].key === key) return k;

@@ -187,6 +187,11 @@
         <button id="btnZoomIn" class="sm">＋</button>
         <button id="btnZoomFit" class="sm ghost">适应</button>
       </div>
+      <!-- 核对模式下才出现：明确区分「核对」和「改标注」两个动作 -->
+      <div class="btnrow mt8" id="compareBar" hidden>
+        <button id="btnExitCompare" class="sm primary">改标注</button>
+        <span class="muted tiny">核对中：点紫色格子 = 让模型重点学这处</span>
+      </div>
       <div class="btnrow mt8">
         <button id="btnPreLabel" class="sm">模型预标注</button>
         <button id="btnCopyPrev" class="sm">复制上局</button>
