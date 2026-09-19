@@ -133,8 +133,9 @@
     });
     if (!prev) { setPreferred(rec.name); return { action: 'promote', best: acc, prev: 0 }; }
 
-    // 差 3 个点以上就认为是退化 —— 小波动是正常的，不该来回横跳
-    if (acc < prev - 3) {
+    var P = Evolve.loadParams();
+    // 差到阈值以上才认为是退化 —— 小波动是正常的，不该来回横跳
+    if (acc < prev - P.promoteDrop) {
       if (typeof Evolve !== 'undefined' && Evolve.isAuto('promote')) {
         setPreferred(prevName);
         log('择优：新模型 ' + fmt(acc, 1) + '% 低于已有的 ' + fmt(prev, 1) + '%，保留「' + prevName + '」为首选');
@@ -143,6 +144,15 @@
       }
       pushEvLog('提醒：新模型 ' + fmt(acc, 1) + '% 低于旧的 ' + fmt(prev, 1) + '%，建议先别换');
       return { action: 'keep', best: acc, prev: prev };
+    }
+
+    // 提升门槛：验证集本身有噪声，好一点点不能算真进步 ——
+    // 不设门槛的话模型会在同一水平上来回横跳
+    if (prev && acc < prev + P.promoteGain) {
+      setPreferred(rec.name);
+      log('择优：新模型 ' + fmt(acc, 1) + '% 与旧模型 ' + fmt(prev, 1) +
+          '% 的差距小于提升门槛 ' + P.promoteGain + '，视为同一水平');
+      return { action: 'promote', best: acc, prev: prev };
     }
 
     setPreferred(rec.name);
@@ -885,7 +895,7 @@
   function renderPolicy() {
     var el = $('policyList');
     if (!el || typeof Evolve === 'undefined') return;
-    var pol = Evolve.loadPolicy();
+    var pol = Evolve.snapshotPolicy();
     var riskText = { low: '低风险', medium: '中风险', high: '高风险' };
 
     el.innerHTML = Evolve.ACTIONS.map(function (a) {
@@ -914,10 +924,109 @@
   }
 
   function renderEvolve() {
+    renderPresets();
     renderPolicy();
+    renderParamPanel();
     renderEvLog();
     renderScanList();
+    // 进这个页面时顺便算一次，让用户立刻看到"它在等什么"
+    if (typeof Evolve !== 'undefined') renderAutoStatus(autoReadiness());
   }
+
+  /** 预设档 */
+  function renderPresets() {
+    var el = $('presetRow');
+    if (!el || typeof Evolve === 'undefined') return;
+    var cur = Evolve.currentPreset();
+    el.innerHTML = Evolve.PRESETS.map(function (p) {
+      return '<button data-k="' + p.key + '"' + (cur === p.key ? ' class="on"' : '') +
+        '>' + p.label + '</button>';
+    }).join('');
+    Array.prototype.forEach.call(el.children, function (b) {
+      b.addEventListener('click', function () {
+        var pre = Evolve.PRESETS.filter(function (x) { return x.key === b.dataset.k; })[0];
+        if (!confirm('切换到「' + pre.label + '」档？\n\n' + pre.desc)) return;
+        Evolve.applyPreset(b.dataset.k);
+        renderPresets();
+        renderPolicy();
+        renderParamPanel();
+        pushEvLog('切换到「' + pre.label + '」档');
+        toast('已切到「' + pre.label + '」档', 2600);
+      });
+    });
+
+    var c = Evolve.PRESETS.filter(function (x) { return x.key === cur; })[0];
+    $('presetDesc').textContent = c ? c.desc : '还没有选择档位 —— 当前是自定义设置。';
+  }
+
+  /**
+   * 参数面板。
+   *
+   * 按用途分组，每组标题说明这一组在管什么 ——
+   * 一堆数字堆在一起是没法用的，得让人知道每个数字是为了防什么。
+   */
+  function renderParamPanel() {
+    var el = $('paramPanel');
+    if (!el || typeof Evolve === 'undefined') return;
+    var P = Evolve.snapshotParams();
+
+    var groups = {};
+    Evolve.PARAMS.forEach(function (d) {
+      (groups[d.group] = groups[d.group] || []).push(d);
+    });
+
+    var groupHint = {
+      '触发': '决定什么时候动手',
+      '评估': '决定动了算不算数 —— 这一类最容易被忽略',
+      '数据': '决定拿什么数据训',
+      '修改': '决定单次改多少'
+    };
+
+    el.innerHTML = Object.keys(groups).map(function (g) {
+      return '<div class="pgroup"><div class="pgroup__t">' + g +
+        '　' + (groupHint[g] || '') + '</div>' +
+        groups[g].map(function (d) {
+          var v = P[d.key];
+          var ctl;
+          if (d.toggle) {
+            ctl = '<button class="tg' + (v ? ' on' : '') + '" data-k="' + d.key +
+              '" data-t="1"></button>';
+          } else {
+            ctl = '<input type="number" data-k="' + d.key + '" value="' + v +
+              '" min="' + d.min + '" max="' + d.max + '" step="' + d.step + '">' +
+              '<span class="u">' + d.unit + '</span>';
+          }
+          return '<div class="param"><div class="param__i">' +
+            '<div class="param__l">' + d.label + '</div>' +
+            '<div class="param__h">' + d.hint + '</div></div>' +
+            '<div class="param__v">' + ctl + '</div></div>';
+        }).join('') + '</div>';
+    }).join('');
+
+    // 数字输入：失焦时写回（不要在每次按键时写，否则输到一半就被夹断）
+    Array.prototype.forEach.call(el.querySelectorAll('input[type=number]'), function (inp) {
+      inp.addEventListener('change', function () {
+        var nv = Evolve.setParam(inp.dataset.k, parseFloat(inp.value));
+        if (nv !== null) inp.value = nv;
+      });
+    });
+    // 开关：点一下切换
+    Array.prototype.forEach.call(el.querySelectorAll('.tg'), function (b) {
+      b.addEventListener('click', function () {
+        var cur = Evolve.loadParams()[b.dataset.k] ? 1 : 0;
+        Evolve.setParam(b.dataset.k, cur ? 0 : 1);
+        b.classList.toggle('on', !cur);
+      });
+    });
+  }
+
+  $('btnResetParams').addEventListener('click', function () {
+    if (!confirm('把所有参数恢复成默认值？')) return;
+    Evolve.resetParams();
+    renderParamPanel();
+    renderAutoStatus(autoReadiness());
+    toast('参数已恢复默认');
+  });
 
   // ---------------------------------------------------------------- 体检
 
@@ -1038,22 +1147,34 @@
 
   /** 批量按规则自动修：需要模型对每张图的预测 */
   async function autoFixAll() {
-    var targets = usable().filter(function (sm) {
+    var P = Evolve.loadParams();
+    var all = usable().filter(function (sm) {
       return Evolve.validate(sm.cells).length > 0;
     });
-    if (!targets.length) { toast('没有发现违反棋规的样本'); return; }
+    if (!all.length) { toast('没有发现违反棋规的样本'); return; }
+
+    // 单次动作的规模要有上限 —— 一次改太多，出了问题难回退
+    var targets = all.slice(0, P.maxFixImgs);
+    if (all.length > targets.length) {
+      log('违规样本 ' + all.length + ' 张，本次先处理前 ' + targets.length +
+          ' 张（「单次最多改几张图」限制）');
+    }
     if (!(await ensureModel())) return;
 
     setBusy(true, '按规则自动修', '0 / ' + targets.length);
     if (native()) native().keepAwake(true);
 
-    var changed = 0, gained = 0;
+    var changed = 0, gained = 0, cellsUsed = 0;
     for (var i = 0; i < targets.length; i++) {
+      if (cellsUsed >= P.maxFixCells) {
+        log('已达「单次最多改几格」上限（' + P.maxFixCells + '），本次停止');
+        break;
+      }
       var sm = targets[i];
       try {
         var pred = backtest[sm.key] ? backtest[sm.key].pred : await predictCells(sm, inSize);
         var d = await autoFixSample(sm, pred);
-        if (d > 0) { changed++; gained += d; }
+        if (d > 0) { changed++; gained += d; cellsUsed += d; }
       } catch (e) {
         log('自动修失败 ' + sm.name + '：' + e.message);
       }
@@ -1086,8 +1207,13 @@
    * 每一步都是已有的能力，这里只是把它们串起来，省掉来回点。
    * 「自动触发训练」这个策略决定它要不要在体检之后自己跑。
    */
-  async function runAutoCycle() {
+  async function runAutoCycle(opts) {
+    opts = opts || {};
     if (!(await ensureModel())) return;
+    if (opts.auto) {
+      log('自动循环启动（' + (autoReadiness().reason || '') + '）');
+      pushEvLog('自动循环启动：' + (autoReadiness().reason || ''));
+    }
 
     setBusy(true, '自动循环', '按规则修');
     try {
@@ -1126,6 +1252,170 @@
     renderEvLog();
     toast('已清空活动记录');
   });
+
+  // ---------------------------------------------------------------- 空闲检测
+  //
+  // 训练会占住 CPU 十几秒，那期间界面是卡的。如果它在你正标注到一半时
+  // 自己启动，你只会以为应用坏了。所以先等一段空闲时间再动。
+
+  var lastActive = Date.now();
+  var busyDepth = 0;          // 有正在进行的用户操作时不启动
+  var autoTickTimer = null;
+
+  function markActive() { lastActive = Date.now(); }
+
+  /** 用户停手多久了（分钟） */
+  function idleMinutes() { return (Date.now() - lastActive) / 60000; }
+
+  function bindIdleWatch() {
+    // 只监听真正表示"人在操作"的事件，不算 scroll —— 页面自己滚动不该算活动
+    ['pointerdown', 'pointerup', 'keydown', 'touchstart'].forEach(function (ev) {
+      document.addEventListener(ev, markActive, { passive: true });
+    });
+  }
+
+  /**
+   * 熔断记录。
+   *
+   * 数据本身有问题时（比如标定歪了），自动训练会反复跑、反复不提升。
+   * 没有熔断的话它会一直烧时间，而你只会在事后查记录时才发现。
+   */
+  var FAIL_KEY = 'evolve.failStreak.v1';
+  function failStreak() {
+    try { return parseInt(localStorage.getItem(FAIL_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+  }
+  function bumpFailStreak(n) {
+    try { localStorage.setItem(FAIL_KEY, String(n)); } catch (e) { }
+  }
+  function resetFailStreak() { bumpFailStreak(0); }
+
+  var LAST_TRAIN_KEY = 'evolve.lastTrain.v1';
+  function lastTrainAt() {
+    try { return parseInt(localStorage.getItem(LAST_TRAIN_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+  }
+  function markTrainedNow() {
+    try { localStorage.setItem(LAST_TRAIN_KEY, String(Date.now())); } catch (e) { }
+    resetFailStreak();
+  }
+
+  /** 当前有多少处「待学」修正 */
+  function pendingFixCount() {
+    var n = 0;
+    samples.forEach(function (sm) {
+      if (sm.fixed) for (var i = 0; i < CELLS; i++) if (sm.fixed[i]) n++;
+    });
+    return n;
+  }
+
+  /**
+   * 自动循环现在该不该启动。
+   *
+   * 返回的 reason 是给界面用的 —— 全自动最怕的就是用户完全不知道它在等什么。
+   */
+  function autoReadiness() {
+    var P = Evolve.loadParams();
+    var u = usable();
+
+    if (!Evolve.isAuto('train')) {
+      return { ready: false, reason: '「自动触发训练」是关闭的' };
+    }
+
+    var streak = failStreak();
+    if (streak >= P.maxFailStreak) {
+      return { ready: false, halted: true,
+               reason: '已连续 ' + streak + ' 次没有提升，自动训练暂停（排查数据后可手工恢复）' };
+    }
+
+    // 用户刚拒绝过：暂缓一段时间再问。
+    // 单靠 minInterval 不够 —— 那个参数是给"训练频率"用的，
+    // 用户把它调小是为了跑得勤，不该因此变成被反复询问。
+    if (snoozeUntil > Date.now()) {
+      var left = (snoozeUntil - Date.now()) / 60000;
+      return { ready: false, snoozed: true,
+               reason: '你刚跳过了一次，' + fmt(left, 0) + ' 分钟后再问' };
+    }
+
+    if (idleMinutes() < P.idleMinutes) {
+      return { ready: false, reason: '等空闲 ' + P.idleMinutes + ' 分钟再启动（还差 ' +
+               fmt(Math.max(0, P.idleMinutes - idleMinutes()), 1) + ' 分钟）' };
+    }
+    if (busyDepth > 0) return { ready: false, reason: '当前有操作在进行' };
+
+    if (u.length < P.minSamples) {
+      return { ready: false, reason: '可用样本 ' + u.length + ' 张，少于设定的 ' + P.minSamples + ' 张' };
+    }
+
+    var last = lastTrainAt();
+    if (last) {
+      var mins = (Date.now() - last) / 60000;
+      if (mins < P.minInterval) {
+        return { ready: false, reason: '距上次训练 ' + fmt(mins, 0) + ' 分钟，需满 ' + P.minInterval + ' 分钟' };
+      }
+    }
+
+    var n = pendingFixCount();
+    if (n < P.minFixes) {
+      return { ready: false, reason: '待学修正 ' + n + ' 处，需攒够 ' + P.minFixes + ' 处' };
+    }
+
+    return { ready: true, reason: '待学 ' + n + ' 处、样本 ' + u.length + ' 张，条件已满足', fixes: n };
+  }
+
+  /** 定时检查：到条件就按档位处理 */
+  function startAutoTick() {
+    if (autoTickTimer) clearInterval(autoTickTimer);
+    autoTickTimer = setInterval(function () {
+      if (typeof Evolve === 'undefined') return;
+      var r = autoReadiness();
+      renderAutoStatus(r);
+      if (!r.ready) return;
+
+      if (Evolve.isFullAuto('train')) {
+        runAutoCycle({ auto: true });
+      } else if (Evolve.needsConfirm('train') && !autoCycleAsking) {
+        autoCycleAsking = true;
+        askAutoCycle(r);
+      }
+    }, 15000);
+  }
+
+  var autoCycleAsking = false;
+  /** 用户拒绝后的暂缓截止时间（内存态，重启即失效） */
+  var autoSnoozeMs = 10 * 60 * 1000;
+  var snoozeUntil = 0;
+
+  function askAutoCycle(r) {
+    var el = $('autoAsk');
+    if (!el) return;
+    el.hidden = false;
+    $('autoAskText').textContent = r.reason + '。现在跑一次自动循环？';
+    $('btnAutoAskGo').onclick = function () {
+      el.hidden = true;
+      autoCycleAsking = false;
+      runAutoCycle({ auto: true });
+    };
+    $('btnAutoAskNo').onclick = function () {
+      el.hidden = true;
+      autoCycleAsking = false;
+      // 暂缓一段时间，而不是记成"训练过了" ——
+      // 拒绝不等于训练成功，不该把失败熔断的计数清掉
+      snoozeUntil = Date.now() + autoSnoozeMs;
+      pushEvLog('你跳过了这次自动循环，' + (autoSnoozeMs / 60000) + ' 分钟内不再问');
+      renderAutoStatus(autoReadiness());
+    };
+  }
+
+  /** 顶部状态条：让它随时知道自动化在等什么 */
+  function renderAutoStatus(r) {
+    var el = $('autoStatus');
+    if (!el) return;
+    if (typeof Evolve === 'undefined' || !Evolve.isAuto('train')) { el.hidden = true; return; }
+    el.hidden = false;
+    el.innerHTML = (r.ready
+      ? '<span style="color:#3fbf74">● 条件已满足，可以自动训练</span>'
+      : '<span style="color:#66707c">○ ' + escapeHtml(r.reason) + '</span>') +
+      (failStreak() ? '　<span style="color:#e0a33a">连续失败 ' + failStreak() + ' 次</span>' : '');
+  }
 
   // ---------------------------------------------------------------- 关于
   function renderAbout() {
@@ -3574,6 +3864,7 @@
   // ------------------------------------------------ 忙碌遮罩
   // 批量操作动辄几十秒，没有反馈的话用户会以为卡死了。
 
+  // busyDepth 有两个含义：一是遮罩层数，二是"用户正忙别来打扰"
   var busyDepth = 0;
   function setBusy(on, text, sub) {
     var el = $('busy');
@@ -4340,6 +4631,18 @@
         } else if (verdict.action === 'block') {
           toast('新模型比旧模型差，已保留旧模型为首选', 3600);
         }
+
+        // 熔断计数：没提升就累加，提升了就清零
+        if (verdict.action === 'promote' && verdict.best > verdict.prev) {
+          markTrainedNow();
+        } else {
+          bumpFailStreak(failStreak() + 1);
+          var P2 = Evolve.loadParams();
+          if (failStreak() >= P2.maxFailStreak) {
+            pushEvLog('已连续 ' + failStreak() + ' 次没有提升，自动训练暂停');
+            toast('连续 ' + failStreak() + ' 次没提升，自动训练已暂停', 4200);
+          }
+        }
       } catch (e2) {
         log('自动保存失败：' + e2.message);
       }
@@ -4428,10 +4731,14 @@
       return;
     }
 
+    // 微调面板上的值优先（可临时调），但它默认来自全局参数 ——
+    // 这样"自动循环"跑的时候用的是参数里的设置，而不是面板上的陈旧值
     var fixW = clamp(parseInt($('ftWeight').value, 10) || 6, 1, 50);
     var replayPct = clamp(parseInt($('ftReplay').value, 10) || 0, 0, 100);
     var epochs = clamp(parseInt($('ftEpochs').value, 10) || 12, 1, 100);
     var lr = clamp(parseInt($('ftLr').value, 10) || 1, 1, 100) * 1e-4;
+    Evolve.setParam('fixWeight', fixW);
+    Evolve.setParam('replayPct', replayPct);
     var headOnly = $('ftHeadOnly').checked;
 
     $('btnFinetune').disabled = true;
@@ -4836,6 +5143,25 @@
     },
     /** 直接触发回测，供自动化核对用 */
     backtest: function () { return runBacktest(); },
+    /** 自进化：手动触发一轮检查，供自动化核对用 */
+    readiness: function () { return autoReadiness(); },
+    pendingFixes: function () { return pendingFixCount(); },
+    /** 制造若干修正标记，供自动化核对触发逻辑用 */
+    forceFixes: function (n) {
+      var left = n;
+      for (var i = 0; i < samples.length && left > 0; i++) {
+        var sm = samples[i];
+        if (!sm.cells) continue;
+        sm.fixed = sm.fixed || new Array(CELLS).fill(0);
+        for (var j = 0; j < CELLS && left > 0; j++) {
+          if (!sm.cells[j]) continue;
+          if (sm.fixed[j]) continue;
+          sm.fixed[j] = 1;
+          left--;
+        }
+      }
+      return n - left;
+    },
     /** 自进化：手动触发体检 / 自动修，供自动化核对用 */
     scan: function () {
       try {
@@ -4989,6 +5315,9 @@
     refreshCollect();
     loadEvLog();
     renderPolicy();
+    renderParamPanel();
+    bindIdleWatch();
+    startAutoTick();
     renderHome();
     go('home');
 

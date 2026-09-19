@@ -225,20 +225,186 @@
    */
   var ACTIONS = [
     { key: 'collect', label: '采集可疑样本', risk: 'low',
-      hint: '把规则校验发现问题的样本标记出来待复核', def: 2 },
+      hint: '把规则校验发现问题的样本标记出来待复核', def: 3 },
     { key: 'train', label: '自动触发训练', risk: 'medium',
-      hint: '攒够新的修正后自动跑一次，不用手工点', def: 1 },
+      hint: '攒够新的修正后自动跑一次', def: 2 },
     { key: 'fixLabel', label: '自动修改标注', risk: 'high',
-      hint: '把「只违反棋规、且模型也不认同」的格子直接改掉', def: 0 },
+      hint: '把「只违反棋规、且模型也不认同」的格子改掉', def: 1 },
     { key: 'promote', label: '自动替换模型', risk: 'high',
-      hint: '新模型在验证集上更好就自动换掉旧的', def: 0 }
+      hint: '新模型在验证集上更好就换掉旧的', def: 1 }
   ];
 
+  /**
+   * 四档，语义递进 —— 每一档和相邻那档的差别都是明确的。
+   *
+   *   关      什么都不做，界面上也不提
+   *   只建议  界面上标出来，不打断你
+   *   问我    主动弹一次确认，你点一下才做
+   *   直接做  不打断，做完告诉你
+   *
+   * 中间特意留了「问我」这一档：全自动唯一的优势是"你不在时也能跑"，
+   * 而本应用的使用场景是人就在旁边 —— 一次确认只花两秒，
+   * 却换来"随时知道它在干什么"。
+   */
   var TIERS = [
-    { v: 0, label: '只建议', desc: '只提示，不自己动手' },
-    { v: 1, label: '半自动', desc: '满足硬条件才自动，否则问你' },
-    { v: 2, label: '全自动', desc: '不打断你，直接做' }
+    { v: 0, label: '关', desc: '不做，也不提示' },
+    { v: 1, label: '只建议', desc: '标出来，但不打断你' },
+    { v: 2, label: '问我', desc: '主动弹确认，你点一下才做' },
+    { v: 3, label: '直接做', desc: '不打断，做完告诉你' }
   ];
+
+  // ---------------------------------------------------------------- 参数
+
+  /**
+   * 可调参数。
+   *
+   * 刻意保持少 —— 一堆旋钮看着灵活，实际是"出问题没法定位"。
+   * 这里每一项都对应一个真实的判断点，没有凑数的。
+   */
+  var PARAMS = [
+    // ── 触发条件：决定「什么时候动」──
+    { key: 'idleMinutes', group: '触发', label: '空闲多久才启动', unit: '分钟',
+      min: 0, max: 30, step: 1, def: 2,
+      hint: '训练会占住 CPU 十几秒、期间界面卡顿。你停手一段时间再启动，就不会以为应用坏了。' },
+    { key: 'minFixes', group: '触发', label: '攒够多少修正才跑', unit: '处',
+      min: 5, max: 500, step: 5, def: 50,
+      hint: '太少则频繁空跑，太多则模型迟迟不更新。' },
+    { key: 'minInterval', group: '触发', label: '两次训练最短间隔', unit: '分钟',
+      min: 0, max: 720, step: 10, def: 30,
+      hint: '防止短时间内反复训练（数据没变、结果也一样）。' },
+    { key: 'minSamples', group: '触发', label: '少于多少张图不训', unit: '张',
+      min: 5, max: 500, step: 5, def: 20,
+      hint: '样本太少训出来的模型不稳定，跑了也是白跑。' },
+    { key: 'maxFailStreak', group: '触发', label: '连续几次没提升就停', unit: '次',
+      min: 1, max: 20, step: 1, def: 2,
+      hint: '熔断。数据本身有问题时会反复白跑，而你以为是"它自己在进化"。' },
+
+    // ── 评估门槛：决定「动了算不算数」──
+    // 这一类最容易被忽略，但它决定自动化能不能自己判断好坏
+    { key: 'promoteGain', group: '评估', label: '好多少才算真进步', unit: '个点',
+      min: 0, max: 20, step: 0.5, def: 1.5,
+      hint: '验证集本身有噪声。不设门槛的话模型会在同一水平上换来换去。' },
+    { key: 'promoteDrop', group: '评估', label: '差多少就拒绝', unit: '个点',
+      min: 0, max: 30, step: 0.5, def: 3,
+      hint: '新模型比旧的差这么多，就不设为首选。' },
+    { key: 'minValSlices', group: '评估', label: '验证集至少多少切片', unit: '个',
+      min: 5, max: 2000, step: 5, def: 30,
+      hint: '低于这个数，准确率数字不可信，宁可当次不评估。' },
+
+    // ── 数据：决定「拿什么训」──
+    { key: 'fixWeight', group: '数据', label: '修正样本的权重', unit: '倍',
+      min: 1, max: 30, step: 1, def: 6,
+      hint: '你改过的格子加权，模型才会重点学。' },
+    { key: 'replayPct', group: '数据', label: '旧数据回放比例', unit: '%',
+      min: 0, max: 100, step: 5, def: 70,
+      hint: '防遗忘。低于 40% 就很容易"改对了 A、B 全忘了"。' },
+    { key: 'excludeAuto', group: '数据', label: '排除机器改过但没验证的样本', unit: '',
+      min: 0, max: 1, step: 1, def: 1, toggle: true,
+      hint: '拿机器自己的猜测去训练，是自训练退化的经典入口。建议保持开启。' },
+
+    // ── 修改：决定「改多少」──
+    { key: 'maxFixImgs', group: '修改', label: '单次最多改几张图', unit: '张',
+      min: 1, max: 200, step: 1, def: 20,
+      hint: '一次改太多，出了问题难回退。' },
+    { key: 'maxFixCells', group: '修改', label: '单次最多改几格', unit: '格',
+      min: 1, max: 2000, step: 5, def: 50,
+      hint: '同上，限制单次动作的规模。' }
+  ];
+
+  var P_KEY = 'evolve.params.v1';
+
+  var params = null;
+
+  function defaultParams() {
+    var p = {};
+    PARAMS.forEach(function (d) { p[d.key] = d.def; });
+    return p;
+  }
+
+  /** 读参数。同样注意返回的是内部对象，见 loadPolicy 的说明 */
+  function loadParams() {
+    if (params) return params;
+    params = defaultParams();
+    try {
+      var raw = localStorage.getItem(P_KEY);
+      if (raw) {
+        var saved = JSON.parse(raw);
+        // 只接受已知的键与合法范围，旧版本残留的脏数据不进判断
+        PARAMS.forEach(function (d) {
+          var v = saved[d.key];
+          if (typeof v === 'number' && v >= d.min && v <= d.max) params[d.key] = v;
+        });
+      }
+    } catch (e) { /* 读不出来就用默认值 */ }
+    return params;
+  }
+
+  function setParam(key, value) {
+    var p = loadParams();
+    var d = null;
+    for (var i = 0; i < PARAMS.length; i++) if (PARAMS[i].key === key) d = PARAMS[i];
+    if (!d) return null;
+    var clamped = Math.max(d.min, Math.min(d.max, value));
+    p[key] = clamped;
+    saveParams();
+    return clamped;
+  }
+
+  function saveParams() {
+    try { localStorage.setItem(P_KEY, JSON.stringify(params)); } catch (e) { }
+  }
+
+  function resetParams() {
+    params = defaultParams();
+    saveParams();
+    return params;
+  }
+
+  /** 预设档：一组参数 + 一组策略，换个档位整体切换 */
+  var PRESETS = [
+    {
+      key: 'observe', label: '观察期',
+      desc: '只采集、只提示，不自动做任何事。先看它在你的数据上表现如何。',
+      policy: { collect: 1, train: 0, fixLabel: 0, promote: 0 },
+      params: {}
+    },
+    {
+      key: 'standard', label: '标准',
+      desc: '攒够一批就跑，训练前问你一句，改标注和换模型只建议。',
+      policy: { collect: 3, train: 2, fixLabel: 1, promote: 1 },
+      params: {}
+    },
+    {
+      key: 'aggressive', label: '激进',
+      desc: '更勤地跑，训练直接开始不再问，改标注和换模型变成半自动。',
+      policy: { collect: 3, train: 3, fixLabel: 2, promote: 2 },
+      params: { minFixes: 20, minInterval: 10, idleMinutes: 1 }
+    }
+  ];
+
+  function applyPreset(key) {
+    var pre = null;
+    for (var i = 0; i < PRESETS.length; i++) if (PRESETS[i].key === key) pre = PRESETS[i];
+    if (!pre) return null;
+
+    var pol = loadPolicy();
+    Object.keys(pre.policy).forEach(function (k) { pol[k] = pre.policy[k]; });
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(pol)); } catch (e) { }
+
+    // 预设只覆盖它显式给出的参数，其余保持用户自己调的
+    var pa = loadParams();
+    Object.keys(pre.params || {}).forEach(function (k) { pa[k] = pre.params[k]; });
+    saveParams();
+
+    try { localStorage.setItem('evolve.preset.v1', key); } catch (e) { }
+    return { policy: pol, params: pa };
+  }
+
+  function currentPreset() {
+    var cur = null;
+    try { cur = localStorage.getItem('evolve.preset.v1'); } catch (e) { }
+    return cur || '';
+  }
 
   var STORE_KEY = 'evolve.policy.v1';
 
@@ -250,6 +416,14 @@
     return p;
   }
 
+  /**
+   * 读策略。
+   *
+   * ⚠ 返回的是**内部对象**，不要直接改它 —— 那会绕过 setTier 的持久化，
+   * 而且任何持有它引用的地方都会跟着变（我踩过：先存了"快照"、
+   * 后来又调了别的档位，回头看快照已经变了）。
+   * 需要一份独立副本时用 snapshotPolicy()。
+   */
   function loadPolicy() {
     if (policy) return policy;
     policy = defaults();
@@ -279,13 +453,33 @@
 
   function tierOf(key) { return loadPolicy()[key]; }
 
-  /** 某个动作是否达到「至少半自动」 */
+  /** 独立副本，随便改都不会影响内部状态 */
+  function snapshotPolicy() {
+    var p = loadPolicy(), o = {};
+    Object.keys(p).forEach(function (k) { o[k] = p[k]; });
+    return o;
+  }
+  function snapshotParams() {
+    var p = loadParams(), o = {};
+    Object.keys(p).forEach(function (k) { o[k] = p[k]; });
+    return o;
+  }
+
+  /** 是否至少会在界面上提示（只建议及以上） */
   function isAuto(key) { return tierOf(key) >= 1; }
-  /** 是否全自动（不打断用户） */
-  function isFullAuto(key) { return tierOf(key) >= 2; }
+  /** 是否要主动弹确认（问我及以上） */
+  function needsConfirm(key) { return tierOf(key) === 2; }
+  /** 是否不打断直接做（直接做） */
+  function isFullAuto(key) { return tierOf(key) >= 3; }
 
   var api = {
     COLS: COLS, ROWS: ROWS, CELLS: CELLS,
+    PARAMS: PARAMS, PRESETS: PRESETS,
+    loadParams: loadParams, setParam: setParam,
+    snapshotPolicy: snapshotPolicy, snapshotParams: snapshotParams,
+    resetParams: resetParams, defaultParams: defaultParams,
+    applyPreset: applyPreset, currentPreset: currentPreset,
+    needsConfirm: needsConfirm,
     NAME: NAME, LIMIT: LIMIT,
     isRed: isRed, isBlack: isBlack,
     detectFlipped: detectFlipped,

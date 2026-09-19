@@ -582,3 +582,61 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 .elog { padding: 7px 0; border-bottom: 1px solid var(--line2); line-height: 1.55; }
 .elog:last-child { border-bottom: 0; }
 .elog .t { color: var(--faint); font-size: 10px; }
+
+/* ─── 预设档 ─── */
+.presetrow { display: flex; gap: 7px; }
+.presetrow button {
+  flex: 1; padding: 12px 6px; border-radius: 11px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  font-size: 13px; font-weight: 600;
+}
+.presetrow button.on {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+
+/* ─── 自动条件状态条 ─── */
+.autostatus {
+  font-size: 11.5px; line-height: 1.5;
+  background: var(--panel2); border: 1px solid var(--line2);
+  border-radius: 9px; padding: 9px 11px; margin-bottom: 10px;
+}
+
+/* ─── 参数 ─── */
+.pgroup { margin-bottom: 12px; }
+.pgroup:last-child { margin-bottom: 0; }
+.pgroup__t {
+  font-size: 11px; color: var(--faint); font-weight: 600;
+  letter-spacing: .5px; margin-bottom: 6px;
+}
+.param { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+.param + .param { border-top: 1px solid var(--line2); }
+.param__i { flex: 1; min-width: 0; }
+.param__l { font-size: 12.5px; }
+.param__h { font-size: 10.5px; color: var(--faint); line-height: 1.5; margin-top: 2px; }
+.param__v {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 5px;
+}
+.param__v input[type=number] { width: 62px; }
+.param__v .u { font-size: 10.5px; color: var(--faint); width: 26px; }
+.param__v .tg {
+  width: 42px; height: 24px; border-radius: 12px; background: var(--line);
+  border: 0; position: relative; transition: .15s;
+}
+.param__v .tg::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: .15s;
+}
+.param__v .tg.on { background: var(--accent); }
+.param__v .tg.on::after { left: 21px; }
+
+/* ─── 询问条 ─── */
+.askbar {
+  position: fixed; left: 10px; right: 10px; bottom: 12px; z-index: 55;
+  background: var(--panel3); border: 1px solid var(--accent);
+  border-radius: 14px; padding: 12px 14px;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, .5);
+  display: flex; align-items: center; gap: 12px;
+}
+.askbar[hidden] { display: none !important; }
+.askbar__txt { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.5; }
+.askbar__btns { display: flex; gap: 7px; flex: 0 0 auto; }

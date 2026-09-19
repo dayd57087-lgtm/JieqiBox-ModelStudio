@@ -336,6 +336,13 @@
     </div>
 
     <div class="card">
+      <h2>预设档</h2>
+      <div class="muted tiny mb6">一整组设置换个档位。先跑「观察期」看它在你的数据上表现如何。</div>
+      <div class="presetrow" id="presetRow"></div>
+      <div id="presetDesc" class="muted tiny mt8"></div>
+    </div>
+
+    <div class="card">
       <h2>自动策略</h2>
       <div class="muted tiny mb6">不同动作的风险差得远，所以分开设。改完立刻生效。</div>
       <div id="policyList"></div>
@@ -343,6 +350,13 @@
         ⚠ 验证集永远不参与自动修改 —— 否则准确率数字就不可信了，
         而且是在你最需要判断「到底有没有变好」的时候骗你。这条不给开关。
       </div>
+    </div>
+
+    <div class="card">
+      <h2>自动条件 <span class="sp"></span>
+        <span class="link" id="btnResetParams">恢复默认</span></h2>
+      <div id="autoStatus" class="autostatus" hidden></div>
+      <div id="paramPanel"></div>
     </div>
 
     <div class="card">
@@ -367,6 +381,15 @@
       <h2>类别</h2>
       <div id="classList" class="muted tiny"></div>
     </div>
+  </div>
+</div>
+
+<!-- 自动循环的确认条：「问我」这一档用它 -->
+<div id="autoAsk" class="askbar" hidden>
+  <div class="askbar__txt" id="autoAskText">—</div>
+  <div class="askbar__btns">
+    <button id="btnAutoAskGo" class="sm primary">现在跑</button>
+    <button id="btnAutoAskNo" class="sm ghost">先不用</button>
   </div>
 </div>
 
