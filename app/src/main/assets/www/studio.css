@@ -535,3 +535,50 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 }
 .toolstrip::-webkit-scrollbar { display: none; }
 .toolstrip > button { flex: 0 0 auto; }
+
+/* ─── 自进化：策略面板 ─── */
+.policy {
+  border-bottom: 1px solid var(--line2); padding: 11px 0;
+}
+.policy:last-child { border-bottom: 0; }
+.policy__hd { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.policy__hd b { font-size: 13px; font-weight: 600; }
+.policy__risk {
+  font-size: 9px; font-weight: 700; border-radius: 4px; padding: 1px 5px;
+}
+.policy__risk.low { background: rgba(63,191,116,.18); color: var(--ok); }
+.policy__risk.medium { background: rgba(224,163,58,.18); color: var(--warn); }
+.policy__risk.high { background: rgba(255,59,92,.18); color: var(--red); }
+.policy__hint { font-size: 11px; color: var(--faint); line-height: 1.5; margin-bottom: 7px; }
+.policy__tiers { display: flex; gap: 5px; }
+.policy__tiers button {
+  flex: 1; padding: 7px 4px; font-size: 11.5px; border-radius: 8px;
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+}
+.policy__tiers button.on {
+  background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+}
+
+/* 体检结果里的一条 */
+.scanrow {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 9px 0; border-bottom: 1px solid var(--line2); font-size: 12px;
+  cursor: pointer;
+}
+.scanrow:last-child { border-bottom: 0; }
+.scanrow img {
+  width: 46px; height: 34px; border-radius: 6px; object-fit: cover;
+  background: #000; flex: 0 0 auto;
+}
+.scanrow .t { flex: 1; min-width: 0; }
+.scanrow .nm {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-bottom: 2px;
+}
+.scanrow .msg { font-size: 11px; color: var(--red); line-height: 1.5; }
+.scanrow.fixed { opacity: .5; }
+.scanrow.fixed .msg { color: var(--ok); }
+
+.elog { padding: 7px 0; border-bottom: 1px solid var(--line2); line-height: 1.55; }
+.elog:last-child { border-bottom: 0; }
+.elog .t { color: var(--faint); font-size: 10px; }

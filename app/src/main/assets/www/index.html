@@ -307,6 +307,51 @@
 <!-- 底部上下文抽屉：选中样本后的操作 -->
 <div class="sheet" id="sheet"></div>
 
+<!-- ══════════════ 自进化 ══════════════ -->
+<div class="screen" id="sc-evolve">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromEvolve">‹</button>
+    <span class="ttl">自进化</span>
+    <span class="sp"></span>
+  </header>
+  <div class="scroll">
+
+    <div class="card">
+      <h2>体检 <span class="sp"></span>
+        <span class="muted tiny" id="scanWhen"></span></h2>
+      <div class="muted">用象棋的硬规则检查全部标注：棋子数量、帅仕相的位置、将帅照面。
+        违反这些的局面在真实对局里根本不可能出现，所以一旦违反，几乎必然是标错了 ——
+        这是不需要人告诉答案就能发现错误的唯一可靠来源。</div>
+      <div class="btnrow mt8">
+        <button id="btnScan" class="primary">开始体检</button>
+        <button id="btnAutoFixAll" class="sm">按规则自动修</button>
+      </div>
+      <div class="btnrow mt8">
+        <button id="btnAutoCycle" class="sm">一条龙：修 → 微调 → 择优</button>
+      </div>
+      <div id="scanSummary" class="muted tiny mt8">还没有体检过。</div>
+      <div id="scanList" class="bt-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>自动策略</h2>
+      <div class="muted tiny mb6">不同动作的风险差得远，所以分开设。改完立刻生效。</div>
+      <div id="policyList"></div>
+      <div class="mt8 tiny" style="color:#e0a33a;line-height:1.6">
+        ⚠ 验证集永远不参与自动修改 —— 否则准确率数字就不可信了，
+        而且是在你最需要判断「到底有没有变好」的时候骗你。这条不给开关。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>活动记录 <span class="sp"></span>
+        <span class="link" id="btnClearEvolveLog">清空</span></h2>
+      <div id="evolveLog" class="muted tiny">还没有自动动作。</div>
+    </div>
+
+  </div>
+</div>
+
 <!-- 关于 -->
 <div class="screen" id="sc-about">
   <header class="bar-hd">
@@ -332,6 +377,7 @@
 
 <script src="vendor/tf.min.js"></script>
 <script src="lattice.js?v=70"></script>
+<script src="evolve.js?v=70"></script>
 <script src="onnx-export.js?v=70"></script>
 <script src="studio.js?v=70"></script>
 </body>

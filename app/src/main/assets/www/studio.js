@@ -85,18 +85,86 @@
    * 行为一致，用户不用记「哪个功能需要先载入模型」。
    * @returns true 表示 model 已就绪
    */
+  /**
+   * 当前「首选」模型。
+   *
+   * 默认是最新训练的那个，但如果新版在验证集上明显更差，就把旧的留作首选 ——
+   * 不然一次失败的训练会悄悄把能用的模型顶掉，而你只会在下次用时才发现。
+   */
+  var PREF_KEY = 'evolve.preferredModel.v1';
+
+  function preferredModel() {
+    if (!savedModels.length) return null;
+    var want = null;
+    try { want = localStorage.getItem(PREF_KEY); } catch (e) { }
+    if (want) {
+      for (var i = 0; i < savedModels.length; i++) {
+        if (savedModels[i].name === want) return savedModels[i];
+      }
+    }
+    return savedModels[0];
+  }
+
+  function setPreferred(name) {
+    try { localStorage.setItem(PREF_KEY, name); } catch (e) { }
+  }
+
+  /** 从模型记录的描述里抠出验证准确率 */
+  function accOf(rec) {
+    if (!rec || !rec.meta) return 0;
+    var m = /验证集\s*([\d.]+)%/.exec(rec.meta.desc || '');
+    return m ? parseFloat(m[1]) : 0;
+  }
+
+  /**
+   * 训练完之后决定要不要把这个模型设为首选。
+   * @returns {{action:'promote'|'keep'|'block', best:number, prev:number}}
+   */
+  function guardPromotion(rec) {
+    var acc = accOf(rec);
+    if (!acc) return { action: 'promote', best: 0, prev: 0 };   // 没数字，无从比较
+
+    // 找现存最好的（不含刚训的这个）
+    var prev = 0, prevName = '';
+    savedModels.forEach(function (m) {
+      if (m.name === rec.name) return;
+      var a = accOf(m);
+      if (a > prev) { prev = a; prevName = m.name; }
+    });
+    if (!prev) { setPreferred(rec.name); return { action: 'promote', best: acc, prev: 0 }; }
+
+    // 差 3 个点以上就认为是退化 —— 小波动是正常的，不该来回横跳
+    if (acc < prev - 3) {
+      if (typeof Evolve !== 'undefined' && Evolve.isAuto('promote')) {
+        setPreferred(prevName);
+        log('择优：新模型 ' + fmt(acc, 1) + '% 低于已有的 ' + fmt(prev, 1) + '%，保留「' + prevName + '」为首选');
+        pushEvLog('新模型 ' + fmt(acc, 1) + '% 不如旧的 ' + fmt(prev, 1) + '%，已保留旧模型为首选');
+        return { action: 'block', best: acc, prev: prev };
+      }
+      pushEvLog('提醒：新模型 ' + fmt(acc, 1) + '% 低于旧的 ' + fmt(prev, 1) + '%，建议先别换');
+      return { action: 'keep', best: acc, prev: prev };
+    }
+
+    setPreferred(rec.name);
+    if (acc > prev) {
+      pushEvLog('升级：新模型 ' + fmt(acc, 1) + '% 优于旧的 ' + fmt(prev, 1) + '%，已设为首选');
+    }
+    return { action: 'promote', best: acc, prev: prev };
+  }
+
   async function ensureModel() {
     if (model) return true;
     if (!savedModels.length) {
       toast('还没有模型 —— 先到「训练」页跑一次', 3400);
       return false;
     }
-    setBusy(true, '载入模型', savedModels[0].name);
+    var rec = preferredModel() || savedModels[0];
+    setBusy(true, '载入模型', rec.name);
     try {
-      await loadModelFromRecord(savedModels[0]);
+      await loadModelFromRecord(rec);
       setBusy(false);
       refreshFinetunePanel();
-      log('已自动载入模型「' + savedModels[0].name + '」');
+      log('已自动载入模型「' + rec.name + '」');
       return true;
     } catch (e) {
       setBusy(false);
@@ -227,7 +295,7 @@
   // 结构：首页（待办）是根，其余都是下钻。
   // 原来四个并列标签的问题是把"该做的事"和"已有的数据"混在一起，
   // 界面从来不回答"我现在该做什么" —— 现在由首页统一回答。
-  var SCREENS = ['home', 'samples', 'train', 'annotate', 'collect', 'about'];
+  var SCREENS = ['home', 'samples', 'train', 'annotate', 'collect', 'about', 'evolve'];
   var currentScreen = 'home';
   var navStack = [];
 
@@ -256,6 +324,7 @@
     else if (name === 'annotate') renderStage();
     else if (name === 'collect') refreshCollect();
     else if (name === 'about') renderAbout();
+    else if (name === 'evolve') renderEvolve();
   }
 
   function goBack() {
@@ -270,7 +339,7 @@
   };
 
   Array.prototype.forEach.call(
-    document.querySelectorAll('#btnBackFromSamples,#btnBackFromTrain,#btnBackFromAnnotate,#btnBackFromCollect,#btnBackFromAbout'),
+    document.querySelectorAll('#btnBackFromSamples,#btnBackFromTrain,#btnBackFromAnnotate,#btnBackFromCollect,#btnBackFromAbout,#btnBackFromEvolve'),
     function (b) { b.addEventListener('click', goBack); }
   );
   $('btnCollectTop').addEventListener('click', function () { go('collect'); });
@@ -738,6 +807,21 @@
     }
 
     h += '<div class="addbtn" id="btnCollectHome">＋ 采集新样本</div>';
+    // 体检发现违规时在这里也提醒一声 —— 那是最值得先处理的事
+    var badN = 0;
+    if (typeof Evolve !== 'undefined') {
+      samples.forEach(function (sm) {
+        if (sm.cells && Evolve.validate(sm.cells).length) badN++;
+      });
+    }
+    if (badN) {
+      h += '<div class="todo t-fix" id="btnEvolveHome">' +
+        '<div class="num">' + badN + '</div>' +
+        '<div class="body"><b>标注可能有问题</b>' +
+        '<span>有 ' + badN + ' 张违反了棋规（棋子超编、帅出九宫、将帅照面）</span></div>' +
+        '<div class="go">去复核 ›</div></div>';
+    }
+    h += '<div class="addbtn" id="btnEvolveHome2">⚙ 自进化与体检</div>';
     h += '<div class="hintline"><div class="dot"></div><div>' +
       '用手机自带的截图功能在对局里截图，回到这里点「采集」就能把新图捞进来。' +
       '授权一次截图文件夹之后，之后每次都不用再手动翻相册。</div></div>';
@@ -752,6 +836,10 @@
     if (cm) cm.addEventListener('click', function () { go('about'); });
     var ch = $('btnCollectHome');
     if (ch) ch.addEventListener('click', function () { go('collect'); });
+    var eh = $('btnEvolveHome');
+    if (eh) eh.addEventListener('click', function () { go('evolve'); });
+    var eh2 = $('btnEvolveHome2');
+    if (eh2) eh2.addEventListener('click', function () { go('evolve'); });
   }
 
   function lastAcc() {
@@ -760,6 +848,284 @@
     var m = /验证集\s*([\d.]+)%/.exec(d.desc || '');
     return m ? parseFloat(m[1]) : 0;
   }
+
+  // ---------------------------------------------------------------- 自进化
+  //
+  // 核心是**规则校验**：象棋的局面有硬约束（棋子定编、帅仕相的活动范围、
+  // 将帅不能照面）。违反这些的局面在真实对局里不可能出现，
+  // 所以一旦违反，几乎必然是标注错了 —— 不需要人告诉答案就能发现错误。
+  //
+  // 剩下三个自动动作都建立在这个信号之上，并按「按动作授权」的策略决定
+  // 是自动执行还是等你确认。
+
+  var EV_KEY = 'evolve.activity.v1';
+  var evLog = [];
+  var scanResults = [];       // [{key, name, thumb, issues, fixed}]
+
+  function loadEvLog() {
+    try { evLog = JSON.parse(localStorage.getItem(EV_KEY) || '[]'); } catch (e) { evLog = []; }
+  }
+  function pushEvLog(text) {
+    evLog.unshift({ at: Date.now(), text: text });
+    if (evLog.length > 60) evLog.length = 60;
+    try { localStorage.setItem(EV_KEY, JSON.stringify(evLog)); } catch (e) { }
+    renderEvLog();
+  }
+  function renderEvLog() {
+    var el = $('evolveLog');
+    if (!el) return;
+    if (!evLog.length) { el.innerHTML = '还没有自动动作。'; return; }
+    el.innerHTML = evLog.slice(0, 20).map(function (e) {
+      return '<div class="elog"><div class="t">' +
+        new Date(e.at).toLocaleString() + '</div>' + escapeHtml(e.text) + '</div>';
+    }).join('');
+  }
+
+  /** 策略面板：每个动作一行，三档按钮 */
+  function renderPolicy() {
+    var el = $('policyList');
+    if (!el || typeof Evolve === 'undefined') return;
+    var pol = Evolve.loadPolicy();
+    var riskText = { low: '低风险', medium: '中风险', high: '高风险' };
+
+    el.innerHTML = Evolve.ACTIONS.map(function (a) {
+      var cur = pol[a.key];
+      return '<div class="policy">' +
+        '<div class="policy__hd"><b>' + a.label + '</b>' +
+        '<span class="policy__risk ' + a.risk + '">' + riskText[a.risk] + '</span></div>' +
+        '<div class="policy__hint">' + a.hint + '</div>' +
+        '<div class="policy__tiers">' +
+        Evolve.TIERS.map(function (t) {
+          return '<button data-a="' + a.key + '" data-t="' + t.v + '"' +
+            (cur === t.v ? ' class="on"' : '') + '>' + t.label + '</button>';
+        }).join('') +
+        '</div></div>';
+    }).join('');
+
+    Array.prototype.forEach.call(el.querySelectorAll('.policy__tiers button'), function (b) {
+      b.addEventListener('click', function () {
+        Evolve.setTier(b.dataset.a, Number(b.dataset.t));
+        renderPolicy();
+        var act = Evolve.ACTIONS.filter(function (x) { return x.key === b.dataset.a; })[0];
+        var tier = Evolve.TIERS[Number(b.dataset.t)];
+        toast('「' + act.label + '」→ ' + tier.label + '：' + tier.desc, 2400);
+      });
+    });
+  }
+
+  function renderEvolve() {
+    renderPolicy();
+    renderEvLog();
+    renderScanList();
+  }
+
+  // ---------------------------------------------------------------- 体检
+
+  /**
+   * 对全部已标注样本跑一遍规则校验。
+   * 只查「这一帧自不自洽」，不需要历史局面，所以在标注场景也适用。
+   */
+  function scanSamples() {
+    var u = usable();
+    scanResults = [];
+    var withIssues = 0, totalIssues = 0;
+
+    u.forEach(function (sm) {
+      var issues = Evolve.validate(sm.cells);
+      if (!issues.length) return;
+      withIssues++;
+      totalIssues += issues.length;
+      scanResults.push({
+        key: sm.key, name: sm.name, thumb: sm.thumb,
+        issues: issues.map(function (x) { return x.msg; }),
+        fixed: !!sm.autoTouched
+      });
+    });
+
+    // 违规多的排前面 —— 越可能标错
+    scanResults.sort(function (a, b) { return b.issues.length - a.issues.length; });
+
+    $('scanSummary').innerHTML = u.length
+      ? ('检查了 <b>' + u.length + '</b> 张已标注样本，' +
+         (withIssues
+           ? ('<span style="color:#ff3b5c">' + withIssues + ' 张有问题（共 ' +
+              totalIssues + ' 处）</span>')
+           : '<span style="color:#3fbf74">全部符合棋规 ✓</span>'))
+      : '还没有已标注的样本。';
+    $('scanWhen').textContent = '刚刚';
+
+    if (typeof Evolve !== 'undefined' && Evolve.isAuto('collect') && withIssues) {
+      pushEvLog('体检发现 ' + withIssues + ' 张违规样本，已列出待复核');
+    }
+    renderScanList();
+    return { withIssues: withIssues, total: u.length };
+  }
+
+  function renderScanList() {
+    var el = $('scanList');
+    if (!el) return;
+    if (!scanResults.length) { el.innerHTML = ''; return; }
+    el.innerHTML = scanResults.map(function (r, i) {
+      return '<div class="scanrow' + (r.fixed ? ' fixed' : '') + '" data-i="' + i + '">' +
+        '<img src="' + r.thumb + '">' +
+        '<div class="t"><div class="nm">' + escapeHtml(r.name) + '</div>' +
+        '<div class="msg">' + r.issues.slice(0, 2).map(escapeHtml).join('；') +
+        (r.issues.length > 2 ? ' 等 ' + r.issues.length + ' 处' : '') + '</div></div>' +
+        '<span class="tiny" style="color:var(--dim)">' + r.issues.length + ' ›</span>' +
+        '</div>';
+    }).join('');
+    Array.prototype.forEach.call(el.children, function (row) {
+      row.addEventListener('click', function () {
+        var r = scanResults[Number(row.dataset.i)];
+        var i = samples.findIndex(function (x) { return x.key === r.key; });
+        if (i >= 0) openAnnotate(i, false);
+      });
+    });
+  }
+
+  $('btnScan').addEventListener('click', function () {
+    setBusy(true, '体检中', '');
+    var r = scanSamples();
+    setBusy(false);
+    toast(r.withIssues
+      ? ('发现 ' + r.withIssues + ' 张有问题，点进去看看')
+      : ('全部 ' + r.total + ' 张都符合棋规'), 3000);
+  });
+
+  // ---------------------------------------------------------------- 按规则自动修
+
+  /**
+   * 规则门控的自动修改。
+   *
+   * 只改「违反棋规」的那些格子，而且**改完要再验一遍** ——
+   * 违规数必须真的减少才采用。这是关键：模型也可能输出违规的结果，
+   * 不做这一步就是拿错误覆盖错误。
+   *
+   * 改过的格子记入待学清单，下次微调时模型会重点学；
+   * 样本打上 autoTouched 标记，让人一眼看出哪些是机器动过的。
+   */
+  async function autoFixSample(sm, pred) {
+    var before = sm.cells;
+    var issuesBefore = Evolve.validate(before);
+    if (!issuesBefore.length) return 0;
+    if (!pred) return 0;                       // 没有模型意见，无从改起
+
+    // 只动「违规涉及的格子」；像"三个车"这种全局性违规没有具体格子，跳过
+    var touched = {};
+    issuesBefore.forEach(function (is) {
+      (is.cells || []).forEach(function (i) { touched[i] = 1; });
+    });
+    var keys = Object.keys(touched);
+    if (!keys.length) return 0;
+
+    var cand = before.slice();
+    keys.forEach(function (k) { cand[Number(k)] = pred[Number(k)]; });
+
+    // 规则门控：改完必须真的变好
+    var after = Evolve.validate(cand);
+    if (after.length >= issuesBefore.length) return 0;
+
+    sm.cells = cand;
+    sm.fixed = sm.fixed || new Array(CELLS).fill(0);
+    keys.forEach(function (k) {
+      var i = Number(k);
+      if (cand[i] !== before[i]) sm.fixed[i] = 1;
+    });
+    sm.autoTouched = true;
+    await dbPut(toRecord(sm));
+    return issuesBefore.length - after.length;
+  }
+
+  /** 批量按规则自动修：需要模型对每张图的预测 */
+  async function autoFixAll() {
+    var targets = usable().filter(function (sm) {
+      return Evolve.validate(sm.cells).length > 0;
+    });
+    if (!targets.length) { toast('没有发现违反棋规的样本'); return; }
+    if (!(await ensureModel())) return;
+
+    setBusy(true, '按规则自动修', '0 / ' + targets.length);
+    if (native()) native().keepAwake(true);
+
+    var changed = 0, gained = 0;
+    for (var i = 0; i < targets.length; i++) {
+      var sm = targets[i];
+      try {
+        var pred = backtest[sm.key] ? backtest[sm.key].pred : await predictCells(sm, inSize);
+        var d = await autoFixSample(sm, pred);
+        if (d > 0) { changed++; gained += d; }
+      } catch (e) {
+        log('自动修失败 ' + sm.name + '：' + e.message);
+      }
+      $('busySub').textContent = (i + 1) + ' / ' + targets.length;
+      if (i % 3 === 2) await yieldTick();
+    }
+
+    if (native()) native().keepAwake(false);
+    setBusy(false);
+    renderStats();
+    renderSamples();
+    scanSamples();
+    renderHome();
+
+    if (changed) {
+      pushEvLog('按规则自动修正 ' + changed + ' 张样本，消除 ' + gained + ' 处棋规冲突');
+      log('自动修：' + changed + ' 张，消除 ' + gained + ' 处违规');
+      toast('修正了 ' + changed + ' 张，消除 ' + gained + ' 处违规', 3200);
+    } else {
+      toast('这些问题模型也修不了（改了反而更差），需要你人工判断', 3600);
+      pushEvLog('自动修：' + targets.length + ' 张问题样本里，规则门控没有放行任何一处');
+    }
+  }
+
+  $('btnAutoFixAll').addEventListener('click', function () { autoFixAll(); });
+
+  /**
+   * 一条龙：按规则修 → 重建数据集 → 微调 → 评估 → 择优。
+   *
+   * 每一步都是已有的能力，这里只是把它们串起来，省掉来回点。
+   * 「自动触发训练」这个策略决定它要不要在体检之后自己跑。
+   */
+  async function runAutoCycle() {
+    if (!(await ensureModel())) return;
+
+    setBusy(true, '自动循环', '按规则修');
+    try {
+      await autoFixAll();
+      $('busyText').textContent = '自动循环';
+      $('busySub').textContent = '重建数据集';
+      setBusy(false);
+      go('train');
+      trainTab('train');
+      $('btnBuild').click();
+      await new Promise(function (r) { setTimeout(r, 800); });
+      // 等数据集就绪（按钮复位即表示完成）
+      for (var w = 0; w < 60; w++) {
+        await new Promise(function (r) { setTimeout(r, 500); });
+        if (!$('btnBuild').disabled) break;
+      }
+      $('busyText').textContent = '自动循环';
+      $('busySub').textContent = '微调';
+      setBusy(true);
+      trainTab('fix');
+      $('btnFinetune').click();
+      pushEvLog('自动循环：规则修 → 重建数据集 → 微调，已发起');
+    } catch (e) {
+      setBusy(false);
+      log('自动循环失败：' + e.message);
+      toast('自动循环失败：' + e.message, 3600);
+      return;
+    }
+    setBusy(false);
+  }
+
+  $('btnAutoCycle').addEventListener('click', function () { runAutoCycle(); });
+  $('btnClearEvolveLog').addEventListener('click', function () {
+    evLog = [];
+    try { localStorage.removeItem(EV_KEY); } catch (e) { }
+    renderEvLog();
+    toast('已清空活动记录');
+  });
 
   // ---------------------------------------------------------------- 关于
   function renderAbout() {
@@ -2431,7 +2797,7 @@
       key: s.key, name: s.name, w: s.w, h: s.h, thumb: s.thumb, blob: s.blob,
       lattice: s.lattice, cells: s.cells, conf: s.conf,
       auto: s.auto, src: s.src, pins: s.pins,
-      fixed: s.fixed, skip: s.skip
+      fixed: s.fixed, skip: s.skip, autoTouched: s.autoTouched
     };
   }
 
@@ -3324,7 +3690,40 @@
   // 不存下来的话，关掉应用模型就没了，等于没法「训练完隔天再测」。
 
   var MODEL_PREFIX = 'model:';
-  var AUTO_MODEL_NAME = '最近一次训练';
+
+  /**
+   * 自动保存的模型名。
+   *
+   * 以前用固定的「最近一次训练」—— 但那样每次训练都会**覆盖上一个**，
+   * 择优守卫就没有比较对象了（永远只有一个模型，无从判断好坏）。
+   * 改成带时间戳，保留最近几个，守卫才能真正比较。
+   */
+  function autoModelName() {
+    var d = new Date();
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return '训练-' + (d.getMonth() + 1) + p(d.getDate()) + '-' +
+      p(d.getHours()) + p(d.getMinutes());
+  }
+
+  /** 只保留最近 N 个模型，避免把存储撑满（每个约 370KB） */
+  var KEEP_MODELS = 6;
+
+  async function pruneModels() {
+    var all = await dbAll();
+    var ms = (all || []).filter(isModelRecord).sort(function (a, b) { return b.at - a.at; });
+    // 首选的那个必须留着，哪怕它已经很旧
+    var keep = {};
+    try { keep[localStorage.getItem(PREF_KEY)] = 1; } catch (e) { }
+    var toDrop = [];
+    var keptCount = 0;
+    ms.forEach(function (m) {
+      if (keep[m.name]) return;
+      if (keptCount < KEEP_MODELS) { keptCount++; return; }
+      toDrop.push(m.key);
+    });
+    for (var i = 0; i < toDrop.length; i++) await dbDel(toDrop[i]);
+    if (toDrop.length) log('清理了 ' + toDrop.length + ' 个旧模型');
+  }
 
   function isModelRecord(r) { return r && String(r.key || '').indexOf(MODEL_PREFIX) === 0; }
 
@@ -3927,9 +4326,20 @@
 
       // 自动留一份：不然关掉应用模型就没了，隔天想回测还得重训
       try {
-        await saveModelToDb(AUTO_MODEL_NAME, { desc: currentMeta });
+        var rec = await saveModelToDb(autoModelName(), { desc: currentMeta });
+        await pruneModels();
         await refreshSavedModels();
-        log('已自动保存本次训练结果，可在「模型」页重新载入');
+        // 刚存的那个不一定在 [0]（同分钟内可能有更新的），按名字找回来
+        var justSaved = null;
+        for (var mi = 0; mi < savedModels.length; mi++) {
+          if (savedModels[mi].name === rec.name) { justSaved = savedModels[mi]; break; }
+        }
+        var verdict = guardPromotion(justSaved || savedModels[0]);
+        if (verdict.action === 'promote') {
+          log('已自动保存本次训练结果，并设为首选');
+        } else if (verdict.action === 'block') {
+          toast('新模型比旧模型差，已保留旧模型为首选', 3600);
+        }
       } catch (e2) {
         log('自动保存失败：' + e2.message);
       }
@@ -4186,6 +4596,7 @@
               lr.toExponential(0) + (headOnly ? ' · 仅输出层' : '') +
               ' · 验证集 ' + fmt(valHist[valHist.length - 1] * 100, 1) + '%'
       });
+      await pruneModels();
       await refreshSavedModels();
 
       $('ftStat').innerHTML += '<br><span class="muted">完成，共 ' + fmt(total, 0) + 's</span>';
@@ -4217,6 +4628,8 @@
         }
         // 跳过记录也一并清掉：这轮已经学完了，下一轮该重新看一遍
         if (sm.skip) for (var j = 0; j < CELLS; j++) sm.skip[j] = 0;
+        // 「机器改过」表示"有待验证的自动修改"；已经学进模型，这个状态就结束了
+        sm.autoTouched = false;
       });
       if (cleared) {
         await Promise.all(samples.map(function (sm) { return dbPut(toRecord(sm)); }));
@@ -4423,6 +4836,18 @@
     },
     /** 直接触发回测，供自动化核对用 */
     backtest: function () { return runBacktest(); },
+    /** 自进化：手动触发体检 / 自动修，供自动化核对用 */
+    scan: function () {
+      try {
+        var r = scanSamples();
+        return { ok: true, result: r, rows: document.querySelectorAll('#scanList .scanrow').length };
+      } catch (e) {
+        return { ok: false, error: e.message, stack: (e.stack || '').split('\n').slice(0, 3) };
+      }
+    },
+    policy: function () { return Evolve.loadPolicy(); },
+    setTier: function (k, t) { return Evolve.setTier(k, t); },
+    evLog: function () { return evLog.slice(0, 10); },
     /** 导航，供自动化核对用 */
     go: function (name) { go(name); return currentScreen; },
     screen: function () { return currentScreen; },
@@ -4562,6 +4987,8 @@
     refreshFinetunePanel();
     renderAbout();
     refreshCollect();
+    loadEvLog();
+    renderPolicy();
     renderHome();
     go('home');
 
