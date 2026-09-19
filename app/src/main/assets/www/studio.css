@@ -438,3 +438,15 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .busy .txt { font-size: 13px; color: var(--text); }
 .busy .sub { font-size: 11px; color: var(--faint); }
+
+/* 回测列表的筛选条 */
+.chips { display: flex; gap: 7px; flex-wrap: wrap; }
+.chips:empty { display: none; }
+.chip {
+  background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+  border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 12px;
+  display: flex; align-items: center; gap: 5px; cursor: pointer;
+}
+.chip b { color: var(--text); font-weight: 600; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.chip.on b { color: #fff; }

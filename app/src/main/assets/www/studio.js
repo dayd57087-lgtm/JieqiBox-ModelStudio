@@ -250,6 +250,7 @@
   $('tabTrain').addEventListener('click', function () { trainTab('train'); });
   $('tabFix').addEventListener('click', function () { trainTab('fix'); });
   $('btnBacktest2').addEventListener('click', function () { runBacktest(); });
+  $('btnGotoTrain').addEventListener('click', function () { trainTab('train'); });
   $('btnJumpFilter').addEventListener('click', function () {
     sampleFilter = 'all';
     go('samples');
@@ -502,11 +503,16 @@
       '<button class="ab" data-a="del"><span class="ic">✕</span>删除</button>' +
       '</div>';
 
+    // 把「当前筛选出来的这批」作为翻页范围 —— 从哪筛进来的就在哪一类里翻
+    var ctx = filteredSamples();
+    var ctxLabel = sampleFilter === 'all' ? '全部样本'
+      : (sampleFilter === 'fix' ? '有修正的' : STATE_LABEL[sampleFilter]);
+
     $('sheet').querySelector('[data-a="annotate"]').addEventListener('click', function () {
-      openAnnotate(i, false);
+      openAnnotate(i, false, ctx, ctxLabel);
     });
     $('sheet').querySelector('[data-a="compare"]').addEventListener('click', function () {
-      openAnnotate(i, true);   // 带着「对比模型」进去，省一步点击
+      openAnnotate(i, true, ctx, ctxLabel);
     });
     $('sheet').querySelector('[data-a="pick"]').addEventListener('click', function () {
       picked[s.key] = true;
@@ -557,9 +563,14 @@
     picked = {}; renderStats(); renderSamples(); closeSheet();
   });
 
-  /** 打开某张图进入标注（专注模式） */
-  function openAnnotate(i, compare) {
+  /**
+   * 打开某张图进入标注（专注模式）。
+   * @param ctxList  翻页要依据的集合；不传就用当前筛选结果
+   * @param ctxLabel 那个集合叫什么（显示在标题上）
+   */
+  function openAnnotate(i, compare, ctxList, ctxLabel) {
     if (i < 0 || i >= samples.length) return;
+    if (ctxList) setNavContext(ctxList, ctxLabel);
     current = i;
     var s = samples[i];
     mode = s.lattice ? 'paint' : 'draw';
@@ -1597,7 +1608,17 @@
     if (mode === 'draw' && drawStart && drawNow) drawRough(drawStart, drawNow, S);
     sctx.restore();
 
-    $('imgName').textContent = s.name;
+    // 标题带上「在当前这一类里的位置」—— 只显示文件名的话，
+    // 用户不知道自己在哪一类里翻到第几张了
+    var list = navList();
+    var at = -1;
+    for (var li = 0; li < list.length; li++) if (list[li] === s) { at = li; break; }
+    if (at >= 0 && list.length > 1) {
+      $('imgName').textContent = s.name + '　·　' + navLabel() +
+        ' ' + (at + 1) + '/' + list.length;
+    } else {
+      $('imgName').textContent = s.name;
+    }
     $('calibInfo').textContent = s.lattice
       ? ('已标定 · 置信度 ' + fmt(s.conf, 1) + ' · 格子 ' +
          fmt(Math.max(s.lattice.dx * s.w, s.lattice.dy * s.h) * S, 0) + 'px 显示')
@@ -2525,12 +2546,61 @@
     renderSamples();
     toast('已复制上一局的标注');
   });
-  $('btnPrev').addEventListener('click', function () {
-    if (current > 0) { current--; mode = 'paint'; updateModeButtons(); renderStage(); renderSamples(); }
-  });
-  $('btnNext').addEventListener('click', function () {
-    if (current < samples.length - 1) { current++; mode = 'paint'; updateModeButtons(); renderStage(); renderSamples(); }
-  });
+  /**
+   * 在**当前筛选**内翻页，而不是在全部样本里翻。
+   *
+   * 场景：筛出「待核对 8 张」，点进第一张核对，按下一个应该到第二张待核对的；
+   * 以前会走到「全部样本」里的下一张 —— 可能是个已经就绪的图，
+   * 于是核对到一半就被甩出这个类别，还得回样本库重新找。
+   */
+  /**
+   * 当前翻页所依据的集合。
+   *
+   * 进标注页的入口不止一个 —— 样本库（带筛选）、回测列表（可只看有错的）。
+   * 从哪进来就该在哪一类里翻：筛出「待核对 8 张」，点进去后按下一个
+   * 应该到下一张待核对的，而不是跳到一张已经就绪的图。
+   */
+  var navContext = null;   // { list: [样本], label: '待核对' }
+
+  function navList() {
+    if (navContext && navContext.list && navContext.list.length) return navContext.list;
+    return filteredSamples();
+  }
+
+  function navLabel() {
+    if (navContext && navContext.label) return navContext.label;
+    var f = sampleFilter;
+    if (f === 'all') return '全部样本';
+    if (f === 'fix') return '有修正的';
+    return STATE_LABEL[f] || '样本';
+  }
+
+  function setNavContext(list, label) {
+    navContext = (list && list.length) ? { list: list.slice(), label: label } : null;
+  }
+
+  function stepSample(dir) {
+    var list = navList();
+    if (!list.length) return;
+
+    var cur = samples[current];
+    var at = -1;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === cur || list[i].key === (cur && cur.key)) { at = i; break; }
+    }
+    if (at < 0) at = dir > 0 ? -1 : 0;
+
+    var next = at + dir;
+    if (next < 0 || next >= list.length) {
+      toast((dir > 0 ? '「' + navLabel() + '」的最后一张了' : '「' + navLabel() + '」的第一张了'), 1800);
+      return;
+    }
+    var target = list[next];
+    openAnnotate(samples.indexOf(target), false);
+  }
+
+  $('btnPrev').addEventListener('click', function () { stepSample(-1); });
+  $('btnNext').addEventListener('click', function () { stepSample(1); });
 
   // ---------------------------------------------------------------- 切片
   function cropCells(img, lat, imgW, imgH, out) {
@@ -2576,6 +2646,26 @@
   var trainFixed = null;
   var valKeys = {};      // 上一轮训练用到的验证图，回测时用来分开统计
 
+  /**
+   * 按**图片**划分训练/验证，避免同一局面的格子同时出现在两边（那是数据泄漏）。
+   *
+   * 抽成独立函数是因为回测也要用它：以前只在「构建数据集」时算一次，
+   * 于是重启后直接点回测的话 valKeys 是空的 —— 所有图都被算成训练图，
+   * 「验证图准确率」显示成 —。回测应当自己保证有这个划分。
+   */
+  function splitValKeys(list) {
+    var ratio = clamp(parseInt($('pVal').value, 10) / 100, 0.05, 0.5);
+    var n = Math.max(1, Math.round(list.length * ratio));
+    var shuffled = list.slice();
+    for (var i = shuffled.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1));
+      var t = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = t;
+    }
+    var set = {};
+    for (var k = 0; k < n && k < shuffled.length; k++) set[shuffled[k].key] = 1;
+    return set;
+  }
+
   function usable() {
     return samples.filter(function (s) { return s.lattice && s.cells; });
   }
@@ -2608,17 +2698,7 @@
     $('btnBuild').textContent = '构建中…';
     log('开始构建数据集，输入尺寸 ' + inSize);
 
-    // 按图片划分训练/验证，避免同一局面的格子同时出现在两边（那是数据泄漏）
-    var valRatio = clamp(parseInt($('pVal').value, 10) / 100, 0.05, 0.5);
-    var nVal = Math.max(1, Math.round(u.length * valRatio));
-    var valSet = {};
-    var shuffled = u.slice();
-    for (var i = shuffled.length - 1; i > 0; i--) {
-      var j = Math.floor(Math.random() * (i + 1));
-      var t = shuffled[i]; shuffled[i] = shuffled[j]; shuffled[j] = t;
-    }
-    for (var k = 0; k < nVal; k++) valSet[shuffled[k].key] = 1;
-    valKeys = valSet;
+    valKeys = splitValKeys(u);
 
     var keepEmpty = clamp(parseInt($('pEmpty').value, 10) / 100, 0, 1);
 
@@ -3259,24 +3339,57 @@
   // 不只给一个准确率：逐张列出错了几格，并且把「训练见过的图」和「验证图」分开统计。
   // 两组差得越多，说明模型越是在背答案而不是真认识棋子。
 
+  /**
+   * 从回测列表点进某张图。
+   *
+   * 翻页范围是**当前回测列表里显示的那些** —— 开了「只看有错的」就是那几张，
+   * 于是可以一直在错的图之间来回改，不会翻着翻着跳到一张全对的图上。
+   */
   function gotoBacktest(key) {
-    var i = -1;
-    for (var k = 0; k < samples.length; k++) if (samples[k].key === key) { i = k; break; }
-    if (i < 0) return;
-    current = i;
-    mode = 'paint';
-    showPred = !!backtest[key];
-    lastPred = backtest[key] ? backtest[key].pred : null;
-    updateModeButtons();
-    go('annotate');
-    renderStage();
-    renderSamples();
+    var list = displayedBacktestKeys();
+    var target = null;
+    for (var i = 0; i < samples.length; i++) if (samples[i].key === key) { target = samples[i]; break; }
+    if (!target) return;
+
+    var listSamples = list.map(function (k) {
+      for (var j = 0; j < samples.length; j++) if (samples[j].key === k) return samples[j];
+      return null;
+    }).filter(Boolean);
+
+    openAnnotate(samples.indexOf(target), !!backtest[key],
+                 listSamples, backtestOnlyWrong ? '有判错的图' : '回测列表');
+  }
+
+  /** 回测列表当前显示哪些（受「只看有错的」影响） */
+  var backtestOnlyWrong = false;
+  function displayedBacktestKeys() {
+    return backtestRows
+      .filter(function (r) { return !backtestOnlyWrong || r.wrong > 0; })
+      .map(function (r) { return r.key; });
   }
 
   /** 只是把已有回测结果画出来，不跑推理 */
   function refreshBacktest() {
-    if (!backtestRows.length) return;
-    renderBacktest(backtestRows, backtestGroups, backtestConf);
+    if (backtestRows.length) {
+      renderBacktest(backtestRows, backtestGroups, backtestConf);
+      return;
+    }
+    // 还没回测过：把「点哪里开始」说清楚，别让用户对着空面板发呆
+    var u = usable();
+    var hasModel = model || savedModels.length;
+    var el = $('backtestSummary');
+    if (!u.length) {
+      el.innerHTML = '还没有可回测的图 —— 先标定并标注一些样本。';
+    } else if (!hasModel) {
+      el.innerHTML = '还没有模型。点上面的「重新回测」会先让你去训练，' +
+        '或者直接到「训练」页跑一次。';
+    } else {
+      el.innerHTML = '已有 <b>' + u.length + '</b> 张可回测的图' +
+        (model ? '' : '，模型「' + escapeHtml(savedModels[0].name) + '」会自动载入') +
+        '。<br>点右上角「重新回测」开始。';
+    }
+    var acts = $('backtestEmptyActions');
+    if (acts) acts.hidden = !!hasModel;
   }
 
   var backtestRows = [], backtestGroups = null, backtestConf = null;
@@ -3284,7 +3397,38 @@
   async function runBacktest() {
     var u = usable();
     if (!u.length) { toast('先标定并标注一些图'); return; }
-    if (!model) { toast('先训练一次，或载入一个模型'); return; }
+
+    // 没有划分过（比如重启后直接回测）就现算一份，
+    // 否则「验证图准确率」会永远是 —（所有图都被算成训练图）
+    if (!Object.keys(valKeys).length) {
+      valKeys = splitValKeys(u);
+      log('回测：现场划分验证集 ' + Object.keys(valKeys).length + ' 张');
+    }
+
+    /*
+     * 没载入模型时自动取最新保存的那个。
+     *
+     * 回测依赖的是**已保存的模型**，跟「这次开应用有没有训练过」没关系。
+     * 以前重启应用后 model 是空的，点回测只会弹一句「先训练一次」——
+     * 但用户明明昨天就训好了，模型还躺在库里。
+     */
+    if (!model) {
+      if (!savedModels.length) {
+        toast('还没有模型 —— 先到「训练」页跑一次', 3200);
+        return;
+      }
+      setBusy(true, '载入模型', savedModels[0].name);
+      try {
+        await loadModelFromRecord(savedModels[0]);
+        log('回测：自动载入模型「' + savedModels[0].name + '」');
+      } catch (e) {
+        setBusy(false);
+        toast('载入模型失败：' + e.message, 3600);
+        return;
+      }
+      setBusy(false);
+      refreshFinetunePanel();
+    }
 
     var btn = $('btnBacktest');
     if (btn) btn.disabled = true;
@@ -3348,8 +3492,28 @@
     refreshTrainTab();
   }
 
+  /** 回测列表顶部的筛选：全部 / 只看有错的 */
+  function refreshBacktestFilter(rows) {
+    var el = $('btFilter');
+    if (!el) return;
+    var total = rows.length;
+    var bad = rows.filter(function (r) { return r.wrong > 0; }).length;
+    el.innerHTML =
+      '<button class="chip' + (backtestOnlyWrong ? '' : ' on') + '" data-only="0">' +
+      '全部 <b>' + total + '</b></button>' +
+      '<button class="chip' + (backtestOnlyWrong ? ' on' : '') + '" data-only="1">' +
+      '只看有错的 <b>' + bad + '</b></button>';
+    Array.prototype.forEach.call(el.querySelectorAll('.chip'), function (b) {
+      b.addEventListener('click', function () {
+        backtestOnlyWrong = b.dataset.only === '1';
+        renderBacktest(backtestRows, backtestGroups, backtestConf);
+      });
+    });
+  }
+
   function renderBacktest(rows, g, conf) {
     rows.sort(function (a, b) { return b.wrong - a.wrong || b.wrongNE - a.wrongNE; });
+    refreshBacktestFilter(rows);
 
     var pct = function (w, t) { return t ? (1 - w / t) * 100 : 0; };
     var trainAcc = pct(g.train.wrong, g.train.cells);
@@ -3376,7 +3540,8 @@
       '<div class="mt8 tiny"><span class="' + vclass + '">' + verdict + '</span></div>' +
       (conf ? matrixHtml(conf) : '');
 
-    $('backtestList').innerHTML = rows.map(function (r) {
+    var shown = rows.filter(function (r) { return !backtestOnlyWrong || r.wrong > 0; });
+    $('backtestList').innerHTML = shown.map(function (r) {
       var cls = r.wrong === 0 ? 'good' : (r.wrong <= 3 ? 'mid' : 'bad');
       return '<div class="bt-row ' + cls + '" data-key="' + escapeHtml(r.key) + '">' +
         '<img class="sw" src="' + r.thumb + '" alt="">' +
