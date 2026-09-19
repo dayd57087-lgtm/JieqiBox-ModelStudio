@@ -49,4 +49,6 @@ android {
 dependencies {
     implementation 'androidx.webkit:webkit:1.11.0'
     implementation 'androidx.core:core-ktx:1.13.1'
+    // 截图文件夹走 SAF 目录授权，需要 DocumentFile 遍历
+    implementation 'androidx.documentfile:documentfile:1.0.1'
 }

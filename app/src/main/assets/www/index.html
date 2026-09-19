@@ -4,88 +4,182 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=20">
+<link rel="stylesheet" href="studio.css?v=30">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">模型工坊 <em>采集 · 标注 · 训练</em></div>
-  <nav class="tabs">
-    <button data-tab="samples" class="on">样本</button>
-    <button data-tab="annotate">标注</button>
-    <button data-tab="train">训练</button>
-    <button data-tab="models">模型</button>
-  </nav>
-</header>
+<!-- ══════════════ 首页：待办 ══════════════
+     不跳页也不堆数据，只回答一个问题：现在该做什么。
+     每一项点进去就是对应的专注流程或工作台。 -->
+<div class="screen on" id="sc-home">
+  <header class="home-hd">
+    <h1>模型工坊</h1>
+    <p id="homeSubtitle">正在检查…</p>
+  </header>
+  <div class="scroll" id="todoList"></div>
+</div>
 
-<main>
-
-<!-- ========== 样本 ========== -->
-<section id="tab-samples" class="tab on">
-  <div class="card">
-    <h2>导入</h2>
-    <div class="row">
-      <button id="btnImport" class="primary">导入截图</button>
-      <button id="btnDemo">生成演示局面</button>
-      <button id="btnClearSamples" class="danger-ghost">清空</button>
+<!-- ══════════════ 样本工作台 ══════════════
+     顶部统计条本身就是筛选；点样本从底部滑出操作抽屉。
+     上下文（筛了什么、选了哪些）始终不丢。 -->
+<div class="screen" id="sc-samples">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromSamples">‹</button>
+    <span class="ttl">样本库</span>
+    <span class="sp"></span>
+    <button class="mini" id="btnCollectTop">采集</button>
+  </header>
+  <div class="stats" id="statsBar"></div>
+  <div class="bulkbar" id="bulkBar">
+    <span id="bulkText">已选 0 张</span>
+    <span class="sp"></span>
+    <span class="link" id="btnSelAll">全选</span>
+    <span class="link" id="btnSelNone">取消</span>
+  </div>
+  <div class="scroll">
+    <div class="grid" id="sampleGrid"></div>
+    <div class="empty" id="samplesEmpty" hidden>
+      <div class="ic">▤</div>
+      <p>还没有样本。<br>点右上角「采集」从手机截图导入，或生成演示局面先跑通流程。</p>
     </div>
-    <input id="fileInput" type="file" accept="image/*" multiple hidden>
-    <div id="sampleSummary" class="muted mt8">还没有样本。导入对局截图，或先点「生成演示局面」验证整条链路。</div>
+  </div>
+</div>
+
+<!-- ══════════════ 训练台 ══════════════
+     分两个页面：训练 / 纠错。纠错是训练手段之一，不是另一个功能模块。 -->
+<div class="screen" id="sc-train">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromTrain">‹</button>
+    <span class="ttl">训练台</span>
+    <span class="sp"></span>
+  </header>
+  <div class="tabs">
+    <button id="tabTrain" class="on">训练</button>
+    <button id="tabFix">纠错</button>
   </div>
 
-  <div class="card" id="batchCard" hidden>
-    <h2>批量处理</h2>
-    <div class="muted tiny mb6">导入之后，先把所有图一次性标定好，再逐张核对会快很多。</div>
-    <div class="row">
-      <button id="btnBatchCalib" class="primary">批量标定未标定的图</button>
-      <button id="btnDemoFrom">以当前图为模板生成</button>
-    </div>
-    <div class="row mt8">
-      <label class="muted tiny">生成数量 <input type="number" id="demoCount" value="30" min="5" max="300" step="5"></label>
-    </div>
-    <div id="batchInfo" class="muted tiny mt8"></div>
-  </div>
-
-  <div id="sampleGrid" class="grid"></div>
-</section>
-
-<!-- ========== 标注 ========== -->
-<section id="tab-annotate" class="tab">
-  <div id="annotateEmpty" class="card empty">
-    <div class="ic">◲</div>
-    <p>先在「样本」里导入截图。<br>标注前要在棋盘外沿拖一个框，程序会自动把格线拟合到亚像素。</p>
-  </div>
-
-  <div id="annotateBody" hidden>
-    <div class="card tight">
-      <div class="row between">
-        <button id="btnPrev" class="icon">‹</button>
-        <div class="grow center">
-          <div id="imgName" class="ellipsis">—</div>
-          <div id="calibInfo" class="muted tiny">未标定</div>
-        </div>
-        <button id="btnNext" class="icon">›</button>
+  <div class="scroll">
+  <!-- ── 训练 ── -->
+  <div class="pane on" id="pane-train">
+    <div class="card">
+      <h2>数据集 <span class="sp"></span>
+        <span class="link" id="btnJumpFilter">按状态筛选</span></h2>
+      <div id="dataSummary" class="muted">还没有已标注的样本。</div>
+      <div class="kpi mt8" id="dataKpi"></div>
+      <div class="btnrow mt8">
+        <button id="btnBuild" class="primary">构建数据集</button>
+        <button id="btnPreLabelAll" class="sm">批量预标注</button>
+        <button id="btnPreviewCells" class="sm" disabled>看切片</button>
       </div>
-      <!--
-        图例放在这里而不是画布上：棋盘通常铺满画布，
-        浮在左上角会把边路的格子盖住，正好是核对时最需要看的地方。
-      -->
-      <div id="legend" class="legendbar"></div>
+      <canvas id="cellPreview" class="mt8" hidden></canvas>
     </div>
 
+    <div class="card">
+      <h2>参数 <span class="sp"></span>
+        <button id="btnRecommend" class="sm ghost">按数据量推荐</button></h2>
+      <div class="params">
+        <label>输入尺寸 <input type="number" id="pSize" value="32" min="16" max="64" step="4"></label>
+        <label>轮数 <input type="number" id="pEpochs" value="40" min="1" max="400"></label>
+        <label>批大小 <input type="number" id="pBatch" value="64" min="8" max="512" step="8"></label>
+        <label>保留空格 <input type="number" id="pEmpty" value="30" min="0" max="100" step="5"></label>
+        <label>验证图片 <input type="number" id="pVal" value="20" min="10" max="40" step="5"></label>
+        <label>早停耐心 <input type="number" id="pPatience" value="10" min="0" max="100"></label>
+      </div>
+      <div class="btnrow mt8">
+        <button id="btnTrain" class="primary" disabled>开始训练</button>
+        <button id="btnStop" class="sm" disabled>停止</button>
+      </div>
+      <div class="bar mt8"><i id="trainProg"></i></div>
+      <div id="trainStat" class="muted tiny mt6">—</div>
+      <div id="etaText" class="muted tiny"></div>
+    </div>
+
+    <div class="card" id="resultCard" hidden>
+      <h2>结果</h2>
+      <div id="evalStat"></div>
+      <canvas id="lossCurve" hidden></canvas>
+      <div class="btnrow mt8">
+        <button id="btnSaveModel" class="primary">保存模型</button>
+        <button id="btnExportOnnx" class="sm">导出 ONNX</button>
+        <button id="btnBacktest" class="sm">逐图回测</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>历史模型</h2>
+      <div id="modelList" class="muted">还没有模型。</div>
+    </div>
+
+    <div class="card">
+      <h2>日志</h2>
+      <pre id="log" class="logbox"></pre>
+    </div>
+  </div>
+
+  <!-- ── 纠错 ──
+       回测 → 改错 → 微调，是"让模型变好"的第二条路，
+       和从头训练并列，所以放在同一个页面的两个标签里。 -->
+  <div class="pane" id="pane-fix">
+    <div class="card" id="backtestCard">
+      <h2>回测结果 <span class="sp"></span>
+        <button id="btnBacktest2" class="sm ghost">重新回测</button></h2>
+      <div id="backtestSummary" class="muted">还没有回测。训练完会自动跑，或点右上角手动跑一次。</div>
+      <div id="backtestList" class="bt-list"></div>
+    </div>
+
+    <div class="card accent" id="finetuneCard">
+      <h2>纠错微调</h2>
+      <div id="ftSummary" class="muted tiny mb6">
+        回测发现问题后，到样本里用「对比模型」改掉错处，这里就能让模型只学那些改动。
+      </div>
+      <div class="params">
+        <label class="wide">起点模型 <select id="ftBase"></select></label>
+        <label>修正权重 <input type="number" id="ftWeight" value="6" min="1" max="50"></label>
+        <label>回放比例 <input type="number" id="ftReplay" value="70" min="0" max="100" step="5"></label>
+        <label>轮数 <input type="number" id="ftEpochs" value="12" min="1" max="100"></label>
+        <label>学习率 <input type="number" id="ftLr" value="1" min="1" max="100"></label>
+      </div>
+      <label class="switch mt8">
+        <span>只训最后一层（快，不破坏已学好的特征）</span>
+        <input type="checkbox" id="ftHeadOnly">
+      </label>
+      <div class="btnrow mt8">
+        <button id="btnFinetune" class="primary">开始纠错微调</button>
+        <span class="muted tiny" style="margin-left:auto">学习率单位 1e-4</span>
+      </div>
+      <div class="bar mt8"><i id="ftProg"></i></div>
+      <div id="ftStat" class="muted tiny mt6">—</div>
+      <div id="ftCompare" class="mt8"></div>
+    </div>
+  </div>
+  </div>
+</div>
+
+<!-- ══════════════ 标注（专注模式） ══════════════ -->
+<div class="screen" id="sc-annotate">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromAnnotate">‹</button>
+    <div class="ttl2">
+      <b id="imgName">—</b>
+      <span id="calibInfo" class="tiny">未标定</span>
+    </div>
+    <span class="sp"></span>
+    <button class="mini" id="btnPrev">‹</button>
+    <button class="mini" id="btnNext">›</button>
+  </header>
+
+  <div class="scroll" id="annotateBody">
+    <div class="legendbar" id="legend"></div>
     <div class="stagewrap">
       <canvas id="stage"></canvas>
       <div id="stageHint" class="stagehint"></div>
     </div>
-
     <div class="card tight">
-      <!-- 三种操作各占一格，不换行 -->
       <div class="btnrow">
         <button id="btnCalib" class="primary">框选棋盘</button>
         <button id="btnAuto">自动校正</button>
         <button id="btnNudge">微调</button>
       </div>
-      <!-- 缩放单独一行，紧凑右对齐 -->
       <div class="btnrow mt8 slim">
         <span class="muted tiny">缩放</span>
         <button id="btnZoomOut" class="sm">－</button>
@@ -94,19 +188,17 @@
         <button id="btnZoomFit" class="sm ghost">适应</button>
       </div>
       <div class="btnrow mt8">
-        <button id="btnPreLabel" class="primary">模型预标注</button>
+        <button id="btnPreLabel" class="sm">模型预标注</button>
         <button id="btnCopyPrev" class="sm">复制上局</button>
         <button id="btnCheckModel" class="sm">对比模型</button>
         <button id="btnClearCells" class="sm danger-ghost">清空</button>
       </div>
-      <!-- 模板生成要用到「哪里是干净木板」，自动推断不稳，给个手工指定的入口 -->
       <div class="btnrow mt8">
         <button id="btnPinMode" class="sm">取空位</button>
         <button id="btnPinClear" class="sm ghost">清除空位</button>
         <span class="muted tiny" style="margin-left:auto">模板生成用</span>
       </div>
     </div>
-
     <div class="card tight">
       <div class="row between mb6">
         <span class="muted tiny">当前笔刷</span>
@@ -114,116 +206,108 @@
       </div>
       <div id="palette" class="palette"></div>
       <div class="muted tiny mt8">
-        点格子落子 · 同笔刷再点一次擦除 · 双指捏合缩放 · 放大后单指拖动平移
+        点格子落子 · 同笔刷再点擦除 · 双指捏合缩放 · 放大后单指拖动平移
       </div>
     </div>
   </div>
-</section>
 
-<!-- ========== 训练 ========== -->
-<section id="tab-train" class="tab">
-  <div class="card">
-    <h2>数据集</h2>
-    <div id="dataSummary" class="muted">还没有已标注的样本。</div>
-    <div class="row mt8">
-      <button id="btnBuild" class="primary">构建数据集</button>
-      <button id="btnPreLabelAll" class="ghost">批量预标注</button>
-      <button id="btnPreviewCells" class="ghost" disabled>看切片</button>
-    </div>
-    <canvas id="cellPreview" class="mt8" hidden></canvas>
+  <div class="empty" id="annotateEmpty" hidden>
+    <div class="ic">◲</div>
+    <p>还没有样本。<br>先回样本库采集或导入一些截图。</p>
   </div>
+</div>
 
-  <div class="card">
-    <h2>参数 <button id="btnRecommend" class="sm ghost" style="margin-left:auto">按数据量推荐</button></h2>
-    <div class="params">
-      <label>输入尺寸 <input type="number" id="pSize" value="32" min="16" max="64" step="4"></label>
-      <label>轮数 <input type="number" id="pEpochs" value="40" min="1" max="400"></label>
-      <label>批大小 <input type="number" id="pBatch" value="64" min="8" max="512" step="8"></label>
-      <label>保留空格 <input type="number" id="pEmpty" value="30" min="0" max="100" step="5"></label>
-      <label>验证图片 <input type="number" id="pVal" value="20" min="10" max="40" step="5"></label>
-      <label>早停耐心 <input type="number" id="pPatience" value="10" min="0" max="100"></label>
+<!-- ══════════════ 采集 ══════════════ -->
+<div class="screen" id="sc-collect">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromCollect">‹</button>
+    <span class="ttl">采集样本</span>
+    <span class="sp"></span>
+  </header>
+  <div class="scroll">
+    <div class="card">
+      <h2>从截图文件夹导入</h2>
+      <div class="muted">手机截图会存到固定文件夹。授权一次之后，
+        每次截图完回来点一下就能把新图捞进来，不用每次手动翻相册。</div>
+      <div class="btnrow mt8">
+        <button id="btnPickFolder" class="primary">选择截图文件夹</button>
+        <button id="btnScanFolder" class="sm" disabled>扫描新截图</button>
+      </div>
+      <div id="folderInfo" class="muted tiny mt8">还没有授权文件夹。</div>
     </div>
-    <div class="row mt8">
-      <button id="btnTrain" class="primary" disabled>开始训练</button>
-      <button id="btnStop" disabled>停止</button>
-    </div>
-    <div class="bar mt8"><i id="trainProg"></i></div>
-    <div id="trainStat" class="muted tiny mt6">—</div>
-    <div id="etaText" class="muted tiny"></div>
-  </div>
 
-  <!--
-    纠错微调。
-    用途：回测里看到模型错了几格 → 在标注页改对 → 从这里以现有模型为起点
-    再学一遍。只学「改了什么」，用回放防止把别的忘掉。
-  -->
-  <div class="card accent" id="finetuneCard">
-    <h2>纠错微调</h2>
-    <div id="ftSummary" class="muted tiny mb6">
-      回测发现问题后，到「标注」页用「对比模型」改掉错处，这里就能让模型只学那些改动。
+    <div class="card">
+      <h2>从相册选</h2>
+      <div class="muted">系统文件选择器，可以多选。</div>
+      <input id="fileInput" type="file" accept="image/*" multiple hidden>
+      <div class="btnrow mt8">
+        <button id="btnImport">打开相册</button>
+      </div>
     </div>
-    <div class="params">
-      <label class="wide">起点模型
-        <select id="ftBase"></select>
+
+    <div class="card" id="scanCard" hidden>
+      <h2>扫描到的新截图 <span class="sp"></span>
+        <span class="link" id="btnScanAll">全选</span></h2>
+      <div id="scanGrid" class="grid grid-sm"></div>
+      <div class="btnrow mt8">
+        <button id="btnImportScanned" class="primary">导入选中的</button>
+        <button id="btnCancelScan" class="sm ghost">取消</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>没有截图也能开始</h2>
+      <div class="muted">用内置棋盘生成一批带标注的样本，先跑通整条链路。</div>
+      <div class="btnrow mt8">
+        <button id="btnDemo" class="sm">生成演示局面</button>
+        <button id="btnDemoFrom" class="sm">以当前图为模板生成</button>
+      </div>
+      <label class="switch mt8">
+        <span>生成数量</span>
+        <input type="number" id="demoCount" value="30" min="5" max="300" step="5">
       </label>
-      <label>修正权重 <input type="number" id="ftWeight" value="6" min="1" max="50"></label>
-      <label>回放比例 <input type="number" id="ftReplay" value="70" min="0" max="100" step="5"></label>
-      <label>轮数 <input type="number" id="ftEpochs" value="12" min="1" max="100"></label>
-      <label>学习率 <input type="number" id="ftLr" value="1" min="1" max="100" step="1"></label>
     </div>
-    <div class="switch mt8">
-      <span>只训最后一层（快，且不会破坏已学好的特征）</span>
-      <input type="checkbox" id="ftHeadOnly">
-    </div>
-    <div class="row mt8">
-      <button id="btnFinetune" class="primary">开始纠错微调</button>
-      <span class="muted tiny" style="margin-left:auto">学习率单位 1e-4</span>
-    </div>
-    <div class="bar mt8"><i id="ftProg"></i></div>
-    <div id="ftStat" class="muted tiny mt6">—</div>
-    <div id="ftCompare" class="mt8"></div>
-  </div>
 
-  <div class="card" id="resultCard" hidden>
-    <h2>结果</h2>
-    <div id="evalStat"></div>
-    <canvas id="lossCurve" hidden></canvas>
-    <div class="row mt8">
-      <button id="btnSaveModel" class="primary">保存模型</button>
-      <button id="btnExportOnnx">导出 ONNX</button>
-      <button id="btnBacktest">逐图回测</button>
+    <div class="card">
+      <h2>批量处理</h2>
+      <div class="muted">导入之后，先把所有图一次性标定好，再逐张核对会快很多。</div>
+      <div class="btnrow mt8">
+        <button id="btnBatchCalib" class="sm">批量标定未标定的图</button>
+      </div>
+      <div id="batchInfo" class="muted tiny mt8"></div>
+    </div>
+
+    <div class="card">
+      <h2>当前清单</h2>
+      <div id="sampleSummary" class="muted">还没有样本。</div>
+      <div class="btnrow mt8">
+        <button id="btnGoSamples" class="sm">打开样本库</button>
+        <button id="btnClearSamples" class="sm danger-ghost">清空全部</button>
+      </div>
     </div>
   </div>
+</div>
 
-  <div class="card" id="backtestCard" hidden>
-    <h2>逐图回测</h2>
-    <div id="backtestSummary" class="muted">—</div>
-    <div id="backtestList" class="bt-list"></div>
-    <div class="muted tiny mt8">点任意一行会跳到那张图并叠加显示模型预测（错的格子标红）。</div>
-  </div>
+<!-- 底部上下文抽屉：选中样本后的操作 -->
+<div class="sheet" id="sheet"></div>
 
-  <div class="card">
-    <h2>日志</h2>
-    <pre id="log" class="logbox"></pre>
+<!-- 关于 -->
+<div class="screen" id="sc-about">
+  <header class="bar-hd">
+    <button class="back" id="btnBackFromAbout">‹</button>
+    <span class="ttl">关于</span>
+    <span class="sp"></span>
+  </header>
+  <div class="scroll">
+    <div class="card"><h2>环境</h2><div id="aboutBox" class="muted tiny">—</div></div>
+    <div class="card">
+      <h2>类别</h2>
+      <div id="classList" class="muted tiny"></div>
+    </div>
   </div>
-</section>
-
-<!-- ========== 模型 ========== -->
-<section id="tab-models" class="tab">
-  <div class="card">
-    <h2>已保存的模型</h2>
-    <div id="modelList" class="muted">还没有模型。</div>
-  </div>
-  <div class="card">
-    <h2>关于</h2>
-    <div id="aboutBox" class="muted tiny">—</div>
-  </div>
-</section>
-
-</main>
+</div>
 
 <div id="toast" class="toast"></div>
-
 <div id="busy" class="busy" hidden>
   <div class="spin"></div>
   <div class="txt" id="busyText">处理中…</div>
@@ -231,8 +315,8 @@
 </div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=20"></script>
-<script src="onnx-export.js?v=20"></script>
-<script src="studio.js?v=20"></script>
+<script src="lattice.js?v=30"></script>
+<script src="onnx-export.js?v=30"></script>
+<script src="studio.js?v=30"></script>
 </body>
 </html>

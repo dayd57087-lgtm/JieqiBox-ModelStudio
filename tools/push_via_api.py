@@ -57,6 +57,14 @@ if __name__ == "__main__":
     print("远端 HEAD:", parent[:8])
 
     # 2) 本地相对远端 HEAD 改了哪些文件
+    # 注意：如果本地没有 parent 这个对象（远端由 API 推送产生时会发生），
+    # `git diff` 会静默返回空，看起来像"没有改动"。所以先确认对象存在。
+    have = subprocess.run(["git", "cat-file", "-e", parent + "^{commit}"],
+                          cwd=ROOT, capture_output=True).returncode == 0
+    if not have:
+        print("本地没有对象 " + parent[:8] + "，先执行 git fetch origin")
+        sys.exit(1)
+
     changed = subprocess.run(
         ["git", "diff", "--name-status", parent, "HEAD"],
         cwd=ROOT, capture_output=True, text=True).stdout.strip().splitlines()

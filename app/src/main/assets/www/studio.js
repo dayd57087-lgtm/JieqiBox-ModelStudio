@@ -185,27 +185,108 @@
   // 取景状态：把图片的某一块映射到舞台盒子里
   var view = { key: null, boxW: 0, boxH: 0, imgW: 0, imgH: 0, fit: 1, zoom: 1, panX: 0, panY: 0 };
 
-  // ---------------------------------------------------------------- 标签页
-  var tabs = ['samples', 'annotate', 'train', 'models'];
-  function showTab(name) {
-    tabs.forEach(function (t) {
-      $('tab-' + t).classList.toggle('on', t === name);
+  // ---------------------------------------------------------------- 屏幕路由
+  //
+  // 结构：首页（待办）是根，其余都是下钻。
+  // 原来四个并列标签的问题是把"该做的事"和"已有的数据"混在一起，
+  // 界面从来不回答"我现在该做什么" —— 现在由首页统一回答。
+  var SCREENS = ['home', 'samples', 'train', 'annotate', 'collect', 'about'];
+  var currentScreen = 'home';
+  var navStack = [];
+
+  function go(name, opts) {
+    opts = opts || {};
+    if (name === currentScreen) {
+      // 已经在目标页：只刷新，不压栈（避免反复点同一个待办把栈撑满）
+      refreshScreen(name);
+      return;
+    }
+    if (!opts.back) navStack.push(currentScreen);
+
+    SCREENS.forEach(function (sc) {
+      var el = $('sc-' + sc);
+      if (el) el.classList.toggle('on', sc === name);
     });
-    Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
-      b.classList.toggle('on', b.dataset.tab === name);
-    });
-    if (name === 'annotate') renderStage();
-    if (name === 'train') { refreshTrainTab(); refreshFinetunePanel(); }
-    if (name === 'models') refreshSavedModels();
+    currentScreen = name;
+    closeSheet();
+    refreshScreen(name);
   }
-  Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
-    b.addEventListener('click', function () { showTab(b.dataset.tab); });
-  });
+
+  function refreshScreen(name) {
+    if (name === 'home') renderHome();
+    else if (name === 'samples') { renderStats(); renderSamples(); }
+    else if (name === 'train') { refreshTrainTab(); refreshFinetunePanel(); refreshBacktest(); }
+    else if (name === 'annotate') renderStage();
+    else if (name === 'collect') refreshCollect();
+    else if (name === 'about') renderAbout();
+  }
+
+  function goBack() {
+    var prev = navStack.pop() || 'home';
+    go(prev, { back: true });
+  }
+
   window.onAndroidBack = function () {
-    var on = document.querySelector('.tab.on');
-    if (on && on.id !== 'tab-samples') { showTab('samples'); return true; }
+    if ($('sheet').classList.contains('on')) { closeSheet(); return true; }
+    if (currentScreen !== 'home') { goBack(); return true; }
     return false;
   };
+
+  Array.prototype.forEach.call(
+    document.querySelectorAll('#btnBackFromSamples,#btnBackFromTrain,#btnBackFromAnnotate,#btnBackFromCollect,#btnBackFromAbout'),
+    function (b) { b.addEventListener('click', goBack); }
+  );
+  $('btnCollectTop').addEventListener('click', function () { go('collect'); });
+  $('btnGoSamples').addEventListener('click', function () { go('samples'); });
+
+  // 训练台的两个页面：训练 / 纠错
+  function trainTab(which) {
+    $('pane-train').classList.toggle('on', which === 'train');
+    $('pane-fix').classList.toggle('on', which === 'fix');
+    $('tabTrain').classList.toggle('on', which === 'train');
+    $('tabFix').classList.toggle('on', which === 'fix');
+    if (which === 'fix') { refreshBacktest(); refreshFinetunePanel(); }
+  }
+  $('tabTrain').addEventListener('click', function () { trainTab('train'); });
+  $('tabFix').addEventListener('click', function () { trainTab('fix'); });
+  $('btnBacktest2').addEventListener('click', function () { runBacktest(); });
+  $('btnJumpFilter').addEventListener('click', function () {
+    sampleFilter = 'all';
+    go('samples');
+  });
+
+  // ---------------------------------------------------------------- 样本状态
+  //
+  // 把「这张图处于流程的哪一步」变成一个明确的值 ——
+  // 首页的待办、样本库的筛选、卡片上的色标，全都由它驱动，
+  // 三处显示的状态永远一致。
+  function sampleState(s) {
+    if (!s.lattice) return 'uncalibrated';
+    if (!s.cells || annotatedCount(s) === 0) return 'pending';
+    if (s.auto) {
+      for (var i = 0; i < CELLS; i++) if (s.auto[i]) return 'review';
+    }
+    return 'ready';
+  }
+
+  var STATE_LABEL = {
+    uncalibrated: '待标定', pending: '待标注', review: '待核对', ready: '已就绪'
+  };
+  var STATE_COLOR = {
+    uncalibrated: '#e0a33a', pending: '#e0a33a', review: '#7b5cff', ready: '#3fbf74'
+  };
+
+  function sampleCounts() {
+    var c = { total: 0, uncalibrated: 0, pending: 0, review: 0, ready: 0,
+              fixes: 0, fixImgs: 0 };
+    samples.forEach(function (s) {
+      c.total++;
+      c[sampleState(s)]++;
+      var f = fixedCount(s);
+      if (f) { c.fixes += f; c.fixImgs++; }
+    });
+    return c;
+  }
 
   // ---------------------------------------------------------------- 样本管理
   function sampleKey(file) {
@@ -310,50 +391,186 @@
     return n;
   }
 
+  // ---------------------------------------------------------------- 样本库
+  var sampleFilter = 'all';      // all | uncalibrated | pending | review | ready | fix
+  var picked = {};               // key -> true，多选状态
+  var sheetSample = null;        // 抽屉里正在看的样本
+
+  function filteredSamples() {
+    if (sampleFilter === 'all') return samples;
+    if (sampleFilter === 'fix') {
+      return samples.filter(function (s) { return fixedCount(s) > 0; });
+    }
+    return samples.filter(function (s) { return sampleState(s) === sampleFilter; });
+  }
+
+  /** 顶部统计条：既是统计也是筛选，点一下就筛 */
+  function renderStats() {
+    var c = sampleCounts();
+    var items = [
+      { k: '样本', v: c.total, f: 'all' },
+      { k: '待标定', v: c.uncalibrated, f: 'uncalibrated', hot: true },
+      { k: '待标注', v: c.pending, f: 'pending', hot: true },
+      { k: '待核对', v: c.review, f: 'review', hot: true },
+      { k: '修正', v: c.fixes, f: 'fix', fix: true }
+    ];
+    $('statsBar').innerHTML = items.map(function (it) {
+      return '<div class="it' + (it.hot ? ' hot' : '') + (it.fix ? ' fix' : '') +
+        (sampleFilter === it.f ? ' on' : '') +
+        '" data-f="' + it.f + '"><div class="v">' + it.v +
+        '</div><div class="k">' + it.k + '</div></div>';
+    }).join('');
+    Array.prototype.forEach.call($('statsBar').children, function (el) {
+      el.addEventListener('click', function () {
+        sampleFilter = el.dataset.f;
+        picked = {};
+        renderStats();
+        renderSamples();
+      });
+    });
+
+    var n = Object.keys(picked).length;
+    $('bulkBar').classList.toggle('on', n > 0);
+    $('bulkText').textContent = '已选 ' + n + ' 张';
+  }
+
   function renderSamples() {
     var grid = $('sampleGrid');
+    var arr = filteredSamples();
     grid.innerHTML = '';
-    var done = 0;
-    samples.forEach(function (s, i) {
-      if (s.lattice && s.cells) done++;
+
+    arr.forEach(function (s) {
+      var i = samples.indexOf(s);
+      var st = sampleState(s);
+      var f = fixedCount(s);
       var el = document.createElement('button');
-      el.className = 'sample' + (i === current ? ' sel' : '') + (s.lattice && s.cells ? ' done' : '');
-      var pending = 0;
-      if (s.auto) for (var q = 0; q < CELLS; q++) if (s.auto[q]) pending++;
-      var st = s.lattice
-        ? (s.cells ? '已标注 ' + annotatedCount(s) + ' 子' +
-            (pending ? ' · <span style="color:#e0a33a">' + pending + ' 待核对</span>' : '')
-          : '待标注')
-        : '未标定';
-      var badge = pending ? '<span class="badge auto">模型</span>'
-        : (s.cells && annotatedCount(s) ? '<span class="badge manual">已核</span>' : '');
+      el.className = 'smp' + (picked[s.key] ? ' picked' : '');
       el.innerHTML =
-        badge + '<img src="' + s.thumb + '" alt="">' +
-        '<div class="cap"><div class="nm">' + escapeHtml(s.name) + '</div>' +
-        '<div class="st">' + st + '</div></div>' +
-        '<span class="del" role="button">×</span>';
-      el.addEventListener('click', function (ev) {
-        if (ev.target.classList.contains('del')) {
-          ev.stopPropagation();
-          removeSample(s.key);
-          return;
-        }
-        current = i;
-        mode = s.lattice ? 'paint' : 'draw';
-        showPred = false;
-        lastPred = null;
-        updateModeButtons();
-        showTab('annotate');
-        renderStage();
-      });
+        '<img src="' + s.thumb + '" alt="">' +
+        '<span class="st" style="background:' + STATE_COLOR[st] + '">' +
+          STATE_LABEL[st] + '</span>' +
+        (f ? '<span class="fx">' + f + '</span>' : '') +
+        '<span class="tick">✓</span>' +
+        '<div class="bar"><span class="nm">' + escapeHtml(s.name) + '</span>' +
+        '<span>' + annotatedCount(s) + '子</span></div>';
+
+      el.addEventListener('click', function () { tapSample(s, i); });
       grid.appendChild(el);
     });
+
+    $('samplesEmpty').hidden = samples.length > 0;
     $('sampleSummary').innerHTML = samples.length
-      ? '共 <b>' + samples.length + '</b> 张截图，其中 <b>' + done + '</b> 张已标定。已标注的非空格子会用于训练。'
-      : '还没有样本。导入对局截图，或先点「生成演示局面」验证整条链路。';
-    $('annotateEmpty').hidden = samples.length > 0;
-    $('annotateBody').hidden = samples.length === 0;
+      ? '共 <b>' + samples.length + '</b> 张截图。已标注的非空格子会用于训练。'
+      : '还没有样本。';
     updateBatchInfo();
+  }
+
+  /**
+   * 点样本：
+   *   没有多选时 → 弹出抽屉，看这张图的详情与操作
+   *   有多选时   → 切换选中状态（连续多选，不必先按「多选」按钮）
+   */
+  function tapSample(s, i) {
+    if (Object.keys(picked).length > 0) {
+      if (picked[s.key]) delete picked[s.key]; else picked[s.key] = true;
+      renderStats();
+      renderSamples();
+      if (Object.keys(picked).length) openBulkSheet(); else closeSheet();
+      return;
+    }
+    sheetSample = s;
+    openSampleSheet(s, i);
+  }
+
+  function closeSheet() { $('sheet').classList.remove('on'); }
+
+  function openSampleSheet(s, i) {
+    var st = sampleState(s);
+    var f = fixedCount(s);
+    $('sheet').innerHTML =
+      '<div class="hnd"></div>' +
+      '<div class="info">' +
+      '<img src="' + s.thumb + '">' +
+      '<div class="t"><b>' + escapeHtml(s.name) + '</b>' +
+      '<span class="tiny">' + STATE_LABEL[st] + ' · ' + annotatedCount(s) + ' 子' +
+      (f ? ' · <span style="color:#7b5cff">' + f + ' 处修正</span>' : '') +
+      '</span></div></div>' +
+      '<div class="acts">' +
+      '<button class="ab pri" data-a="annotate"><span class="ic">✎</span>标注</button>' +
+      '<button class="ab" data-a="compare"><span class="ic">◑</span>对比模型</button>' +
+      '<button class="ab" data-a="pick"><span class="ic">☑</span>多选</button>' +
+      '<button class="ab" data-a="del"><span class="ic">✕</span>删除</button>' +
+      '</div>';
+
+    $('sheet').querySelector('[data-a="annotate"]').addEventListener('click', function () {
+      openAnnotate(i, false);
+    });
+    $('sheet').querySelector('[data-a="compare"]').addEventListener('click', function () {
+      openAnnotate(i, true);   // 带着「对比模型」进去，省一步点击
+    });
+    $('sheet').querySelector('[data-a="pick"]').addEventListener('click', function () {
+      picked[s.key] = true;
+      renderStats(); renderSamples(); openBulkSheet();
+    });
+    $('sheet').querySelector('[data-a="del"]').addEventListener('click', function () {
+      closeSheet();
+      removeSample(s.key);
+    });
+
+    $('sheet').classList.add('on');
+  }
+
+  function openBulkSheet() {
+    var n = Object.keys(picked).length;
+    $('sheet').innerHTML =
+      '<div class="hnd"></div>' +
+      '<div class="info"><div class="t"><b>已选 ' + n + ' 张</b>' +
+      '<span class="tiny">可以对它们批量操作</span></div></div>' +
+      '<div class="acts c3">' +
+      '<button class="ab pri" data-b="calib"><span class="ic">▦</span>自动标定</button>' +
+      '<button class="ab" data-b="prelabel"><span class="ic">◑</span>模型预标注</button>' +
+      '<button class="ab" data-b="del"><span class="ic">✕</span>删除</button>' +
+      '</div>';
+    $('sheet').querySelector('[data-b="calib"]').addEventListener('click', function () {
+      var keys = Object.keys(picked); closeSheet();
+      batchCalibrate(samples.filter(function (s) { return picked[s.key]; }));
+    });
+    $('sheet').querySelector('[data-b="prelabel"]').addEventListener('click', function () {
+      closeSheet(); preLabelAll();
+    });
+    $('sheet').querySelector('[data-b="del"]').addEventListener('click', function () {
+      var keys = Object.keys(picked);
+      if (!confirm('删除选中的 ' + keys.length + ' 张？')) return;
+      closeSheet();
+      Promise.all(keys.map(function (k) { return removeSample(k); })).then(function () {
+        picked = {}; renderStats(); renderSamples(); renderHome();
+      });
+    });
+    $('sheet').classList.add('on');
+  }
+
+  $('btnSelAll').addEventListener('click', function () {
+    filteredSamples().forEach(function (s) { picked[s.key] = true; });
+    renderStats(); renderSamples(); openBulkSheet();
+  });
+  $('btnSelNone').addEventListener('click', function () {
+    picked = {}; renderStats(); renderSamples(); closeSheet();
+  });
+
+  /** 打开某张图进入标注（专注模式） */
+  function openAnnotate(i, compare) {
+    if (i < 0 || i >= samples.length) return;
+    current = i;
+    var s = samples[i];
+    mode = s.lattice ? 'paint' : 'draw';
+    showPred = false;
+    lastPred = null;
+    updateModeButtons();
+    closeSheet();
+    go('annotate');
+    if (compare) {
+      $('btnCheckModel').click();   // 复用已有的推理入口，避免重复实现
+    }
   }
 
   function escapeHtml(s) {
@@ -383,6 +600,288 @@
     renderSamples();
     toast('已清空');
   });
+
+  // ---------------------------------------------------------------- 首页（待办）
+  //
+  // 首页不堆数据，只回答一个问题：现在该做什么。
+  // 每一项都直接下钻到对应的位置，处理完回来它自己就消失了 ——
+  // 因为待办是从样本状态实时算出来的，不是手动维护的列表。
+
+  function renderHome() {
+    var c = sampleCounts();
+    var hasModel = savedModels.length > 0;
+    var todo = [];
+
+    if (c.uncalibrated) {
+      todo.push({
+        cls: 't-calib', num: c.uncalibrated,
+        title: '标定棋盘',
+        desc: '这 ' + c.uncalibrated + ' 张还没定位棋盘，标定后才能标注',
+        act: function () { sampleFilter = 'uncalibrated'; go('samples'); }
+      });
+    }
+    if (c.pending) {
+      todo.push({
+        cls: 't-review', num: c.pending,
+        title: '标注棋子',
+        desc: '这 ' + c.pending + ' 张标定好了，还没标棋子。可以用「模型预标注」先猜一遍',
+        act: function () { sampleFilter = 'pending'; go('samples'); }
+      });
+    }
+    if (c.review) {
+      todo.push({
+        cls: 't-review', num: c.review,
+        title: '核对预标注',
+        desc: '模型已经猜过一遍，你只需要改错的地方',
+        act: function () { sampleFilter = 'review'; go('samples'); }
+      });
+    }
+    if (c.ready && !hasModel) {
+      todo.push({
+        cls: 't-train', num: '训',
+        title: '训练第一个模型',
+        desc: '已有 ' + c.ready + ' 张可用的图，训练约 30 秒',
+        act: function () { go('train'); trainTab('train'); }
+      });
+    }
+    if (c.fixes) {
+      todo.push({
+        cls: 't-fix', num: c.fixes,
+        title: '修正 ' + c.fixes + ' 处判错',
+        desc: '分布在 ' + c.fixImgs + ' 张图上 —— 改对后让模型重点学这些地方',
+        act: function () { go('train'); trainTab('fix'); }
+      });
+    }
+
+    $('homeSubtitle').textContent = todo.length
+      ? '还有 ' + todo.length + ' 件事要做'
+      : (hasModel ? '都做完了 · 模型准确率 ' + fmt(lastAcc(), 1) + '%'
+                  : '还没有样本，先采集一些截图');
+
+    var h = todo.map(function (t, i) {
+      return '<div class="todo ' + t.cls + '" data-i="' + i + '">' +
+        '<div class="num">' + t.num + '</div>' +
+        '<div class="body"><b>' + t.title + '</b><span>' + t.desc + '</span></div>' +
+        '<div class="go">去处理 ›</div></div>';
+    }).join('');
+
+    // 模型状态常驻显示：它是"成果"不是"待办"
+    if (hasModel) {
+      var m = savedModels[0];
+      var d = m.meta || {};
+      h += '<div class="todo done" id="todoModel">' +
+        '<div class="num">✓</div>' +
+        '<div class="body"><b>' + escapeHtml(m.name) + '</b>' +
+        '<span>' + (d.desc ? escapeHtml(d.desc) + ' · ' : '') +
+        new Date(m.at).toLocaleString() + '</span></div>' +
+        '<div class="go">详情 ›</div></div>';
+    }
+
+    h += '<div class="addbtn" id="btnCollectHome">＋ 采集新样本</div>';
+    h += '<div class="hintline"><div class="dot"></div><div>' +
+      '用手机自带的截图功能在对局里截图，回到这里点「采集」就能把新图捞进来。' +
+      '授权一次截图文件夹之后，之后每次都不用再手动翻相册。</div></div>';
+
+    $('todoList').innerHTML = h;
+
+    Array.prototype.forEach.call($('todoList').querySelectorAll('.todo[data-i]'),
+      function (el) {
+        el.addEventListener('click', function () { todo[Number(el.dataset.i)].act(); });
+      });
+    var cm = $('todoModel');
+    if (cm) cm.addEventListener('click', function () { go('about'); });
+    var ch = $('btnCollectHome');
+    if (ch) ch.addEventListener('click', function () { go('collect'); });
+  }
+
+  function lastAcc() {
+    if (!savedModels.length) return 0;
+    var d = savedModels[0].meta || {};
+    var m = /验证集\s*([\d.]+)%/.exec(d.desc || '');
+    return m ? parseFloat(m[1]) : 0;
+  }
+
+  // ---------------------------------------------------------------- 关于
+  function renderAbout() {
+    var nat = native();
+    var backend = '—';
+    try { backend = tf.getBackend(); } catch (e) { /* 未就绪 */ }
+    $('aboutBox').innerHTML =
+      'tfjs <b>' + tf.version.tfjs + '</b> · 后端 <b>' + backend + '</b><br>' +
+      (nat ? ('原生外壳 <b>' + nat.appVersion() + '</b> · ' + nat.platform())
+           : '浏览器预览模式') + '<br>' +
+      '样本 ' + samples.length + ' 张 · 模型 ' + savedModels.length + ' 个';
+    $('classList').innerHTML = CLASSES.map(function (c) {
+      return '<span style="color:' + c.c + '">' + c.g + '</span>';
+    }).join(' ') + '<br>共 ' + NC + ' 个类别（含空格）';
+  }
+
+  // ---------------------------------------------------------------- 采集
+  //
+  // 利用手机自带的截图功能：截图会落到固定文件夹，授权一次之后
+  // 每次回来点「扫描」就能把新图捞进来，不必每次手动翻相册。
+  //
+  // 用 SAF 的目录授权（ACTION_OPEN_DOCUMENT_TREE）而不是读媒体库权限 ——
+  // 用户自己指定哪个文件夹，应用不需要任何权限。
+
+  var shotBridge = null;
+  var scanned = [];
+  var scanPicked = {};
+
+  function shotFolder() {
+    if (shotBridge === null) {
+      shotBridge = (typeof window.ShotFolder !== 'undefined') ? window.ShotFolder : false;
+    }
+    return shotBridge || null;
+  }
+
+  function refreshCollect() {
+    var b = shotFolder();
+    if (!b) {
+      $('folderInfo').innerHTML = '浏览器预览模式下不可用（需要 Android）。';
+      $('btnPickFolder').disabled = true;
+      $('btnScanFolder').disabled = true;
+    } else {
+      var has = b.hasFolder();
+      $('btnScanFolder').disabled = !has;
+      $('folderInfo').innerHTML = has
+        ? ('已授权：<b>' + escapeHtml(b.folderName() || '截图文件夹') + '</b>')
+        : '还没有授权文件夹。点上面的按钮选一次，之后不用再选。';
+    }
+    updateBatchInfo();
+  }
+
+  $('btnPickFolder').addEventListener('click', function () {
+    var b = shotFolder();
+    if (!b) { toast('此功能需要 Android 应用'); return; }
+    b.pickFolder();
+  });
+
+  $('btnScanFolder').addEventListener('click', function () {
+    var b = shotFolder();
+    if (!b) return;
+    setBusy(true, '扫描截图', '');
+    try {
+      var raw = b.listImages();
+      var arr = JSON.parse(raw || '[]');
+      var known = {};
+      samples.forEach(function (s) { known[s.key] = 1; });
+      scanned = arr.filter(function (it) { return !known[shotKey(it)]; });
+      scanned.sort(function (a, b2) { return (b2.date || 0) - (a.date || 0); });
+      scanPicked = {};
+      log('扫描到 ' + arr.length + ' 张截图，其中新的 ' + scanned.length + ' 张');
+    } catch (e) {
+      log('扫描失败：' + e.message);
+      scanned = [];
+    }
+    setBusy(false);
+    renderScan();
+    toast(scanned.length ? ('发现 ' + scanned.length + ' 张新截图') : '没有新截图', 2200);
+  });
+
+  window.onShotFolderPicked = function (ok, name, reason) {
+    refreshCollect();
+    toast(ok ? ('已授权：' + name) : ('选择文件夹失败：' + (reason || '')), 2600);
+  };
+
+  function shotKey(it) {
+    return [it.name || 'shot', it.size || 0, it.date || 0].join('|');
+  }
+
+  function renderScan() {
+    $('scanCard').hidden = !scanned.length;
+    if (!scanned.length) return;
+    $('scanGrid').innerHTML = scanned.map(function (it, i) {
+      return '<button class="smp' + (scanPicked[it.uri] ? ' picked' : '') +
+        '" data-i="' + i + '">' +
+        '<div style="width:100%;aspect-ratio:9/16;background:#12151a;display:flex;' +
+        'align-items:center;justify-content:center;font-size:11px;color:#66707c">' +
+        '截图</div>' +
+        '<span class="tick">✓</span>' +
+        '<div class="bar"><span class="nm">' + escapeHtml(it.name || '') + '</span></div>' +
+        '</button>';
+    }).join('');
+    Array.prototype.forEach.call($('scanGrid').children, function (el) {
+      el.addEventListener('click', function () {
+        var it = scanned[Number(el.dataset.i)];
+        if (scanPicked[it.uri]) delete scanPicked[it.uri]; else scanPicked[it.uri] = 1;
+        renderScan();
+      });
+    });
+  }
+
+  $('btnScanAll').addEventListener('click', function () {
+    scanned.forEach(function (it) { scanPicked[it.uri] = 1; });
+    renderScan();
+  });
+  $('btnCancelScan').addEventListener('click', function () {
+    scanned = []; scanPicked = {}; renderScan();
+  });
+
+  $('btnImportScanned').addEventListener('click', async function () {
+    var b = shotFolder();
+    if (!b) return;
+    var picks = scanned.filter(function (it) { return scanPicked[it.uri]; });
+    if (!picks.length) { toast('先选几张'); return; }
+
+    setBusy(true, '导入截图', '0 / ' + picks.length);
+    if (native()) native().keepAwake(true);
+    var added = 0, failed = 0;
+    try {
+      for (var i = 0; i < picks.length; i++) {
+        try {
+          // 原生侧已经压到 MAX_EDGE 并转成 JPEG，这里直接当普通图片用
+          var b64 = b.readImage(picks[i].uri);
+          if (!b64) { failed++; } else {
+            var ok = await importFromBase64(b64, picks[i].name || ('截图 ' + (i + 1)),
+                                           picks[i].size || 0, picks[i].date || 0);
+            if (ok) added++; else failed++;
+          }
+        } catch (e) {
+          failed++;
+          log('导入失败 ' + picks[i].name + '：' + e.message);
+        }
+        $('busySub').textContent = (i + 1) + ' / ' + picks.length;
+        if (i % 2 === 1) await yieldTick();
+      }
+    } catch (e) {
+      log('导入中断：' + e.message);
+    }
+    if (native()) native().keepAwake(false);
+    setBusy(false);
+    scanned = scanned.filter(function (it) { return !scanPicked[it.uri]; });
+    scanPicked = {};
+    renderScan();
+    renderSamples();
+    renderHome();
+    updateBatchInfo();
+    log('从截图文件夹导入 ' + added + ' 张' + (failed ? '，失败 ' + failed + ' 张' : ''));
+    toast('导入 ' + added + ' 张' + (failed ? '，失败 ' + failed : ''), 2600);
+  });
+
+  /** 把一张 base64 JPEG 变成样本存进库 */
+  async function importFromBase64(b64, name, size, date) {
+    var key = [name || 'shot', size || 0, date || 0].join('|');
+    if (samples.some(function (s) { return s.key === key; })) return false;
+
+    var blob = await (await fetch('data:image/jpeg;base64,' + b64)).blob();
+    var url = URL.createObjectURL(blob);
+    var im = await loadImage(url);
+    URL.revokeObjectURL(url);
+
+    var cv = document.createElement('canvas');
+    cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+    cv.getContext('2d').drawImage(im, 0, 0);
+    var rec = {
+      key: key, name: name, w: cv.width, h: cv.height,
+      thumb: makeThumb(cv, cv.width, cv.height, null),
+      blob: await canvasToBlob(cv, 'image/jpeg', 0.88),
+      lattice: null, cells: null, auto: null, conf: 0
+    };
+    await dbPut(rec);
+    samples.push(rec);
+    return true;
+  }
 
   // ---------------------------------------------------------------- 演示局面
   // 用内置棋盘图合成带标注的样本，让用户在没有任何截图之前就能跑通全流程。
@@ -1032,7 +1531,7 @@
      * 短边会把整块棋盘压小，另一边留一大片空白 —— 格子只有 34px，点起来费劲。
      * 这里让盒子贴合棋盘比例：优先铺满宽度，高度不够就退回按高度定宽。
      */
-    var wrapW = $('tab-annotate').clientWidth - 22;
+    var wrapW = $('sc-annotate').clientWidth - 22;
     if (wrapW < 80) wrapW = window.innerWidth - 22;
     var maxW = Math.min(wrapW, 620);
     // 上方还有文件名卡片和文件列表，下方是笔刷与按钮，给它们留够位置
@@ -1431,13 +1930,18 @@
     return s.lattice;
   }
 
-  $('btnBatchCalib').addEventListener('click', async function () {
-    var targets = samples.filter(function (s) { return !s.lattice; });
-    if (!targets.length) { toast('所有图都已经标定过了'); return; }
+  /**
+   * 批量标定。
+   * @param targets 指定要处理哪些样本；不传就处理全部「还没标定」的。
+   */
+  async function batchCalibrate(targets) {
+    if (!targets) {
+      targets = samples.filter(function (s) { return !s.lattice; });
+    }
+    targets = targets.filter(function (s) { return !s.lattice; });
+    if (!targets.length) { toast('这些图都已经标定过了'); return; }
 
-    var btn = $('btnBatchCalib');
-    btn.disabled = true;
-    setBusy(true, '批量标定', '0 / ' + targets.length);
+    setBusy(true, '自动标定', '0 / ' + targets.length);
     if (native()) native().keepAwake(true);
 
     var ok = 0, fail = 0;
@@ -1460,39 +1964,28 @@
 
     if (native()) native().keepAwake(false);
     setBusy(false);
-    btn.disabled = false;
+    picked = {};
+    renderStats();
     renderSamples();
-    updateBatchInfo();
     refreshTrainTab();
+    renderHome();
     log('批量标定：成功 ' + ok + ' 张，失败 ' + fail + ' 张');
     toast('标定完成：成功 ' + ok + (fail ? '，失败 ' + fail + '（可逐张手动框选）' : ''), 2800);
-  });
+  }
 
-  /** 样本页那张卡片上的统计 */
+  $('btnBatchCalib').addEventListener('click', function () { batchCalibrate(null); });
+
+  /** 采集页那张卡片上的统计 */
   function updateBatchInfo() {
     var el = $('batchInfo');
     if (!el) return;
-    if (!samples.length) {
-      $('batchCard').hidden = true;
-      return;
-    }
-    $('batchCard').hidden = false;
-    var calib = 0, labeled = 0, pending = 0;
-    samples.forEach(function (s) {
-      if (s.lattice) calib++;
-      if (s.cells) {
-        for (var i = 0; i < CELLS; i++) {
-          if (s.cells[i] > 0) labeled++;
-          if (s.auto && s.auto[i]) pending++;
-        }
-      }
-    });
-    var uncalib = samples.length - calib;
-    el.innerHTML = '已标定 <b>' + calib + '</b> / ' + samples.length +
-      (uncalib ? ' · <span style="color:#e0a33a">待标定 ' + uncalib + '</span>' : '') +
-      ' · 已落子 ' + labeled + ' 格' +
-      (pending ? ' · <span style="color:#e0a33a">其中 ' + pending + ' 格是模型猜的，还没核对</span>' : '');
-    $('btnBatchCalib').disabled = !uncalib;
+    var c = sampleCounts();
+    el.innerHTML = '共 <b>' + c.total + '</b> 张 · 已就绪 <b>' + c.ready + '</b>' +
+      (c.uncalibrated ? ' · <span style="color:#e0a33a">待标定 ' + c.uncalibrated + '</span>' : '') +
+      (c.pending ? ' · <span style="color:#e0a33a">待标注 ' + c.pending + '</span>' : '') +
+      (c.review ? ' · <span style="color:#7b5cff">待核对 ' + c.review + '</span>' : '');
+    var btn = $('btnBatchCalib');
+    if (btn) btn.disabled = !c.uncalibrated;
   }
 
   // ---------------------------------------------------------------- 互动
@@ -2244,7 +2737,10 @@
       var logits = model.apply(xs, { training: false });
       return tf.argMax(logits, -1);
     });
-    var d = await t.data();
+    // 用 dataSync 而不是 await data()：
+    // 后者在页面不可见时会走定时器并被节流到 1 秒 —— 回测 40 张图就要等 40 秒，
+    // 表现像卡死。逐图回测、预标注这些循环里都必须用同步读回。
+    var d = t.dataSync();
     t.dispose();
 
     var out = new Int32Array(CELLS);
@@ -2655,18 +3151,28 @@
     showPred = !!backtest[key];
     lastPred = backtest[key] ? backtest[key].pred : null;
     updateModeButtons();
-    showTab('annotate');
+    go('annotate');
     renderStage();
     renderSamples();
   }
 
-  $('btnBacktest').addEventListener('click', async function () {
+  /** 只是把已有回测结果画出来，不跑推理 */
+  function refreshBacktest() {
+    if (!backtestRows.length) return;
+    renderBacktest(backtestRows, backtestGroups, backtestConf);
+  }
+
+  var backtestRows = [], backtestGroups = null, backtestConf = null;
+
+  async function runBacktest() {
     var u = usable();
-    if (!u.length) { toast('先在「样本」里标定并标注一些图'); return; }
-    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+    if (!u.length) { toast('先标定并标注一些图'); return; }
+    if (!model) { toast('先训练一次，或载入一个模型'); return; }
 
     var btn = $('btnBacktest');
-    btn.disabled = true;
+    if (btn) btn.disabled = true;
+    var btn2 = $('btnBacktest2');
+    if (btn2) btn2.disabled = true;
     if (native()) native().keepAwake(true);
 
     backtest = {};
@@ -2707,14 +3213,25 @@
     } catch (e) {
       log('回测失败 ' + e.message);
       toast('回测失败：' + e.message);
-      btn.disabled = false; btn.textContent = '逐图回测';
+      if (btn) btn.disabled = false;
+      if (btn2) btn2.disabled = false;
       if (native()) native().keepAwake(false);
       return;
     }
 
     if (native()) native().keepAwake(false);
-    btn.disabled = false; btn.textContent = '逐图回测';
+    if (btn) { btn.disabled = false; btn.textContent = '逐图回测'; }
+    if (btn2) btn2.disabled = false;
 
+    backtestRows = rows;
+    backtestGroups = g;
+    backtestConf = conf;
+    renderBacktest(rows, g, conf);
+    refreshFinetunePanel();
+    refreshTrainTab();
+  }
+
+  function renderBacktest(rows, g, conf) {
     rows.sort(function (a, b) { return b.wrong - a.wrong || b.wrongNE - a.wrongNE; });
 
     var pct = function (w, t) { return t ? (1 - w / t) * 100 : 0; };
@@ -2738,9 +3255,9 @@
       (g.train.cells ? fmt(trainAcc, 2) + '%' : '—') + '</b></div>' +
       '<div class="statline"><span>非空格子准确率</span><b>' +
       fmt(pct(g.train.neWrong + g.val.neWrong, g.train.neTotal + g.val.neTotal), 2) + '%</b></div>' +
-      '<div class="statline"><span>回测范围</span><b>' + u.length + ' 张已标注图</b></div>' +
+      '<div class="statline"><span>回测范围</span><b>' + rows.length + ' 张已标注图</b></div>' +
       '<div class="mt8 tiny"><span class="' + vclass + '">' + verdict + '</span></div>' +
-      matrixHtml(conf);
+      (conf ? matrixHtml(conf) : '');
 
     $('backtestList').innerHTML = rows.map(function (r) {
       var cls = r.wrong === 0 ? 'good' : (r.wrong <= 3 ? 'mid' : 'bad');
@@ -2758,7 +3275,9 @@
 
     log('逐图回测：验证图 ' + (g.val.cells ? fmt(valAcc, 2) + '%' : '—') +
         ' · 训练图 ' + (g.train.cells ? fmt(trainAcc, 2) + '%' : '—'));
-  });
+  }
+
+  $('btnBacktest').addEventListener('click', function () { runBacktest(); });
 
   $('btnStop').addEventListener('click', function () {
     stopFlag = true;
@@ -3136,9 +3655,11 @@
 
       // ---- 6) 保留旧模型，方便对比后决定留不留 ----
       var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 13);
+      // desc 里带上验证准确率 —— 首页要显示它，格式与训练保存的保持一致
       await saveModelToDb('微调-' + stamp, {
         desc: '修正 ' + fixIdx.length + ' 格 · ' + epochs + ' 轮 · lr ' +
-              lr.toExponential(0) + (headOnly ? ' · 仅输出层' : '')
+              lr.toExponential(0) + (headOnly ? ' · 仅输出层' : '') +
+              ' · 验证集 ' + fmt(valHist[valHist.length - 1] * 100, 1) + '%'
       });
       await refreshSavedModels();
 
@@ -3156,10 +3677,31 @@
           (predsBefore ? '（微调前 ' + before + ' 格）' : '') +
           ' · 验证 ' + fmt(valHist[valHist.length - 1] * 100, 2) + '%');
 
+      /*
+       * 学完就把修正标记清掉。
+       *
+       * fixed 的语义是「改了但还没学」—— 是个待办，不是历史台账。
+       * 不清的话首页会永远挂着一句「修正 N 处判错」，
+       * 用户明明已经处理完了却不知道还能做什么。
+       */
+      var cleared = 0;
+      samples.forEach(function (sm) {
+        if (!sm.fixed) return;
+        for (var i = 0; i < CELLS; i++) {
+          if (sm.fixed[i]) { sm.fixed[i] = 0; cleared++; }
+        }
+      });
+      if (cleared) {
+        await Promise.all(samples.map(function (sm) { return dbPut(toRecord(sm)); }));
+        log('已清掉 ' + cleared + ' 处修正标记（它们已经学进模型了）');
+      }
+
       drawLossCurve(lossHist, valHist);
       $('resultCard').hidden = false;
+      renderStats();
       renderSamples();
       refreshFinetunePanel();
+      renderHome();
       toast('微调完成：修正的格子学对 ' + after + '/' + fixIdx.length, 3600);
     } catch (e) {
       log('微调失败：' + e.message);
@@ -3351,6 +3893,19 @@
                w: clean.width, h: clean.height, conf: s.conf,
                lattice: s.lattice, cells: s.cells };
     },
+    /** 直接触发回测，供自动化核对用 */
+    backtest: function () { return runBacktest(); },
+    /** 导航，供自动化核对用 */
+    go: function (name) { go(name); return currentScreen; },
+    screen: function () { return currentScreen; },
+    /** 首页待办列表，供自动化核对用 */
+    todos: function () {
+      // 只返回真正的待办（.done 那个是模型卡片，属于成果展示）
+      return Array.prototype.filter.call(
+        document.querySelectorAll('#todoList .todo'),
+        function (t) { return !t.classList.contains('done'); }
+      ).map(function (t) { return t.querySelector('b').textContent; });
+    },
     /** 纠错闭环的内部状态，供自动化核对用 */
     ft: function () {
       var s = currentSample();
@@ -3438,13 +3993,6 @@
       try { await tf.setBackend('cpu'); await tf.ready(); backend = tf.getBackend(); } catch (e2) { }
     }
 
-    var nat = native();
-    $('aboutBox').innerHTML =
-      'tfjs <b>' + tf.version.tfjs + '</b> · 后端 <b>' + backend + '</b><br>' +
-      (nat ? ('原生外壳 <b>' + nat.appVersion() + '</b> · ' + nat.platform()) : '浏览器预览模式') +
-      '<br><br>类别 ' + NC + ' 个：' + LABEL_IDS.join('、') +
-      '<br>裁切系数 ×' + CROP_K + '，导入时图片长边压到 ' + MAX_EDGE + 'px';
-
     log('tfjs ' + tf.version.tfjs + ' / backend ' + backend);
 
     try {
@@ -3458,11 +4006,19 @@
       samples = [];
     }
     current = samples.length ? 0 : -1;
+    refreshSavedModels();
+    renderStats();
     renderSamples();
     refreshTrainTab();
-    refreshSavedModels();
+    refreshFinetunePanel();
+    renderAbout();
+    refreshCollect();
+    renderHome();
+    go('home');
 
-    window.addEventListener('resize', function () { if ($('tab-annotate').classList.contains('on')) renderStage(); });
+    window.addEventListener('resize', function () {
+      if (currentScreen === 'annotate') renderStage();
+    });
   }
 
   boot();

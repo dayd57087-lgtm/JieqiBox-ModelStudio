@@ -4,6 +4,9 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Intent
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -20,7 +23,11 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.documentfile.provider.DocumentFile
 import androidx.webkit.WebViewAssetLoader
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -42,6 +49,12 @@ class MainActivity : Activity() {
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
 
     private val fileChooserRequest = 1001
+    /** 选截图文件夹用的请求码（SAF 目录授权） */
+    private val folderPickRequest = 1002
+
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences("model-studio", MODE_PRIVATE)
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -68,6 +81,7 @@ class MainActivity : Activity() {
         }
         webView.isVerticalScrollBarEnabled = false
         webView.addJavascriptInterface(Bridge(), "StudioNative")
+        webView.addJavascriptInterface(ShotFolderBridge(), "ShotFolder")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
@@ -124,6 +138,31 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == folderPickRequest) {
+            val uri = data?.data
+            if (resultCode == RESULT_OK && uri != null) {
+                // 取持久读权限 —— 不取的话重启后就失效了
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "takePersistableUriPermission failed", e)
+                }
+                val name = folderDisplayName(uri)
+                prefs.edit()
+                    .putString(PREF_SHOT_FOLDER_URI, uri.toString())
+                    .putString(PREF_SHOT_FOLDER_NAME, name)
+                    .apply()
+                val safe = name.replace("'", " ")
+                callJs("window.onShotFolderPicked && " +
+                    "window.onShotFolderPicked(true, '$safe', '')")
+            } else {
+                callJs("window.onShotFolderPicked && " +
+                    "window.onShotFolderPicked(false, '', '已取消')")
+            }
+            return
+        }
         if (requestCode == fileChooserRequest) {
             val cb = filePathCallback
             filePathCallback = null
@@ -158,6 +197,7 @@ class MainActivity : Activity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (::webView.isInitialized) {
             webView.removeJavascriptInterface("StudioNative")
+            webView.removeJavascriptInterface("ShotFolder")
             webView.destroy()
         }
         super.onDestroy()
@@ -213,6 +253,139 @@ class MainActivity : Activity() {
         fun supportedAbis(): String = Build.SUPPORTED_ABIS.joinToString(",")
     }
 
+    /* ------------------------------------------------------------------ */
+    /* 截图文件夹                                                          */
+    /*                                                                     */
+    /* 用 SAF 的目录授权而不是读媒体库权限：用户自己指定哪个文件夹，         */
+    /* 应用不需要任何权限，也不依赖 Android 版本。授权会持久化，重启仍在。   */
+    /* ------------------------------------------------------------------ */
+
+    private fun folderDisplayName(uri: Uri): String {
+        val doc = DocumentFile.fromTreeUri(this, uri)
+        return doc?.name ?: uri.lastPathSegment ?: "截图文件夹"
+    }
+
+    private fun callJs(script: String) {
+        webView.post { webView.evaluateJavascript(script, null) }
+    }
+
+    /** 读出目录里的全部图片，带名称/大小/修改时间，供网页端过滤与选择。 */
+    private fun listFolderImages(): String {
+        val uriStr = prefs.getString(PREF_SHOT_FOLDER_URI, null)
+            ?: return "[]"
+        val tree = DocumentFile.fromTreeUri(this, Uri.parse(uriStr))
+            ?: return "[]"
+        if (!tree.canRead()) return "[]"
+
+        val arr = JSONArray()
+        var count = 0
+        // 按修改时间倒序：最近的截图才是要导入的
+        val files = tree.listFiles()
+            .filter { it.isFile && (it.type?.startsWith("image/") == true) }
+            .sortedByDescending { it.lastModified() }
+
+        for (f in files) {
+            if (count++ >= 300) break          // 够用了，避免超大文件夹卡住
+            val o = JSONObject()
+            o.put("uri", f.uri.toString())
+            o.put("name", f.name ?: "")
+            o.put("size", f.length())
+            o.put("date", f.lastModified())
+            arr.put(o)
+        }
+        return arr.toString()
+    }
+
+    /**
+     * 读一张图，压到长边 1600 并转成 JPEG，返回 base64。
+     *
+     * 必须压缩：直接传原图（动辄 5 MB）走 base64 要 7 MB 字符串，
+     * 跨 JS 桥传这么大会卡住主线程。压完通常在 300 KB 上下。
+     */
+    private fun readFolderImage(uriStr: String): String {
+        try {
+            val uri = Uri.parse(uriStr)
+
+            // 先只读尺寸，算出采样率 —— 直接整图解码遇到大截图会 OOM
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, bounds)
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return ""
+
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_EDGE * 2) {
+                sample *= 2
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val src = contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, decodeOpts)
+            } ?: return ""
+
+            val longEdge = maxOf(src.width, src.height)
+            val scaled: Bitmap = if (longEdge > MAX_EDGE) {
+                val ratio = MAX_EDGE.toFloat() / longEdge.toFloat()
+                Bitmap.createScaledBitmap(
+                    src,
+                    (src.width * ratio).toInt().coerceAtLeast(1),
+                    (src.height * ratio).toInt().coerceAtLeast(1),
+                    true
+                )
+            } else {
+                src
+            }
+
+            val bos = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 88, bos)
+            if (scaled !== src) scaled.recycle()
+            src.recycle()
+            return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "readFolderImage failed", e)
+            return ""
+        } catch (e: OutOfMemoryError) {
+            android.util.Log.e(TAG, "readFolderImage OOM", e)
+            return ""
+        }
+    }
+
+    /** 暴露给网页：window.ShotFolder */
+    inner class ShotFolderBridge {
+        @JavascriptInterface
+        fun hasFolder(): Boolean =
+            prefs.getString(PREF_SHOT_FOLDER_URI, null) != null
+
+        @JavascriptInterface
+        fun folderName(): String =
+            prefs.getString(PREF_SHOT_FOLDER_NAME, "") ?: ""
+
+        @JavascriptInterface
+        fun pickFolder() {
+            runOnUiThread {
+                try {
+                    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+                        addFlags(
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                        )
+                    }
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(intent, folderPickRequest)
+                } catch (e: Exception) {
+                    callJs("window.onShotFolderPicked && " +
+                        "window.onShotFolderPicked(false, '', '无法打开选择器')")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun listImages(): String = listFolderImages()
+
+        @JavascriptInterface
+        fun readImage(uri: String): String = readFolderImage(uri)
+    }
+
     private fun sanitise(name: String): String {
         val cleaned = name.replace(Regex("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]"), "_")
         return if (cleaned.isBlank()) "model.bin" else cleaned
@@ -260,6 +433,12 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        /** 截图导入时的长边上限，与网页端 MAX_EDGE 保持一致 */
+        private const val MAX_EDGE = 1600
+
+        private const val PREF_SHOT_FOLDER_URI = "shotFolderUri"
+        private const val PREF_SHOT_FOLDER_NAME = "shotFolderName"
+
         private const val PAGE_URL =
             "https://appassets.androidplatform.net/assets/www/index.html"
     }
