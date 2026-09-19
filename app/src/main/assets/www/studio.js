@@ -1591,11 +1591,33 @@
      * 短边会把整块棋盘压小，另一边留一大片空白 —— 格子只有 34px，点起来费劲。
      * 这里让盒子贴合棋盘比例：优先铺满宽度，高度不够就退回按高度定宽。
      */
-    var wrapW = $('sc-annotate').clientWidth - 22;
-    if (wrapW < 80) wrapW = window.innerWidth - 22;
+    // 滚动区左右各 12px padding，再留一点边
+    var body = $('annotateBody');
+    var wrapW = (body ? body.clientWidth : window.innerWidth) - 26;
+    if (wrapW < 80) wrapW = window.innerWidth - 26;
     var maxW = Math.min(wrapW, 620);
-    // 上方还有文件名卡片和文件列表，下方是笔刷与按钮，给它们留够位置
-    var maxH = Math.round(clamp(window.innerHeight * 0.56, 260, 620));
+
+    /*
+     * 高度按**实际剩下的空间**算，不再用「视口高度的 56%」这种拍脑袋的比例。
+     *
+     * 底部那条固定区（工具条 + 两行笔刷 + 提示）高度是会变的 ——
+     * 拍脑袋的比例一遇上它变高，棋盘就被挤出屏幕，
+     * 表现是「棋盘显示不完整」。
+     *
+     * 所以直接量：视口高 - 顶栏 - 图例 - 底部固定区 - 一点余量。
+     */
+    var vh = window.innerHeight;
+    function outerH(sel) {
+      var e = document.querySelector(sel);
+      if (!e) return 0;
+      var r = e.getBoundingClientRect();
+      var cs = getComputedStyle(e);
+      return r.height + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom);
+    }
+    var used = outerH('.bar-hd') + outerH('.legendbar') + outerH('.brushbar') +
+               outerH('.stagehint');
+    var avail = vh - used - 16;      // 再留 16px 呼吸空间
+    var maxH = Math.round(clamp(avail, 220, 900));
 
     var aspect = fr.h / fr.w;
     var boxW, boxH;
@@ -2451,9 +2473,15 @@
     var p = $('palette');
     p.innerHTML = '';
 
+    /*
+     * 两行：一行标注、一行改错。每行横向滑动，不折行。
+     *
+     * 之前每类排成 8×2 的网格，两组就是四行 —— 底部占了半屏，棋盘被挤没了。
+     * 现在每组只占一行高度（约 50px），两行加起来 110px 左右。
+     */
     var ROWS = [
-      { key: 'annotate', label: '标注', hint: '点格子 = 记下这一格是什么子' },
-      { key: 'fix', label: '改错', hint: '点格子 = 改成对的，并让模型重点学这里' }
+      { key: 'annotate', label: '标注' },
+      { key: 'fix', label: '改错' }
     ];
 
     ROWS.forEach(function (row) {
@@ -2465,8 +2493,9 @@
       lab.textContent = row.label;
       wrap.appendChild(lab);
 
-      var grid = document.createElement('div');
-      grid.className = 'brushgrid';
+      var strip = document.createElement('div');
+      strip.className = 'brushstrip';
+
       CLASSES.forEach(function (c, i) {
         var b = document.createElement('button');
         var on = (row.key === 'fix') ? (fixBrush === i) : (fixBrush === null && brush === i);
@@ -2474,9 +2503,10 @@
         b.dataset.idx = i;
         b.dataset.row = row.key;
         b.innerHTML = '<span class="g">' + c.g + '</span><span class="cnt"></span>';
-        grid.appendChild(b);
+        strip.appendChild(b);
       });
-      wrap.appendChild(grid);
+
+      wrap.appendChild(strip);
       p.appendChild(wrap);
     });
 
@@ -2485,11 +2515,10 @@
       if (!b) return;
       var i = Number(b.dataset.idx);
       if (b.dataset.row === 'fix') {
-        // 点同一格两次 = 退出改错行，回到标注
-        fixBrush = (fixBrush === i) ? null : i;
+        fixBrush = (fixBrush === i) ? null : i;   // 再点一次退出改错行
       } else {
         brush = i;
-        fixBrush = null;      // 切回标注行
+        fixBrush = null;                          // 切回标注行
       }
       syncBrushUI();
     });
@@ -2506,17 +2535,20 @@
       var i = Number(x.dataset.idx);
       var on = (x.dataset.row === 'fix') ? (fixBrush === i) : (fixBrush === null && brush === i);
       x.classList.toggle('on', on);
+      // 选中项滚进可视区，方便连续改同一个子
+      if (on) {
+        try { x.scrollIntoView({ block: 'nearest', inline: 'center' }); } catch (e) { }
+      }
     });
     p.classList.toggle('fix-mode', fixBrush !== null);
 
     var hint = $('brushHint');
     if (!hint) return;
     if (fixBrush !== null) {
-      hint.innerHTML = '<b style="color:#ffb020">改错模式</b>：点格子会把那一格改成' +
-        '「' + CLASSES[fixBrush].g + '」，并自动列入待学清单。' +
-        '再点一次这个笔刷可退出。';
+      hint.innerHTML = '<b style="color:#ffb020">改错</b>：点格子改成「' +
+        CLASSES[fixBrush].g + '」并列入待学 · 再点同一笔刷退出';
     } else {
-      hint.textContent = '点格子落子 · 同笔刷再点擦除 · 双指捏合缩放 · 放大后单指拖动平移';
+      hint.textContent = '点格子落子 · 同笔刷再点擦除 · 双指缩放';
     }
   }
 

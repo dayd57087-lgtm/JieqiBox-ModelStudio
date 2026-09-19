@@ -63,6 +63,11 @@ html, body {
   flex: 1; min-height: 0; overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+/* 标注页的滚动区用纵向 flex，画布才能靠 margin:auto 居中 */
+#annotateBody {
+  display: flex; flex-direction: column;
+  padding: 10px 12px 0;
+}
 
 /* ─────────── 首页 ─────────── */
 .home-hd { flex: 0 0 auto; padding: 22px 18px 14px; }
@@ -391,9 +396,17 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 .lg i { width: 9px; height: 9px; border-radius: 50%; display: block; box-shadow: 0 0 0 1.5px rgba(0, 0, 0, .55); }
 .lg.warn { border-color: var(--warn); color: var(--warn); }
 
+/*
+ * 画布容器：在剩余空间里垂直居中。
+ * 画布高度受宽度限制（棋盘是竖长的），通常会剩下一些高度 ——
+ * 全堆在下面看着像"底下缺了一块"，居中就自然多了。
+ */
 .stagewrap {
   position: relative; background: #0a0c0f; border: 1px solid var(--line2);
-  border-radius: var(--r); overflow: hidden; margin-bottom: 12px; touch-action: none;
+  border-radius: var(--r); overflow: hidden; touch-action: none;
+  /* 只在下方留白：上方紧贴图例，视觉上更紧凑 */
+  margin: 0 auto 8px;
+  width: fit-content;
 }
 #stage { display: block; width: 100%; height: auto; }
 /*
@@ -413,34 +426,40 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 .stagewrap { margin-bottom: 10px; }
 
 /* ─────────── 笔刷 ─────────── */
-/* 两行笔刷：标注一行、改错一行，语义不同 */
-.palette { display: flex; flex-direction: column; gap: 9px; }
+/*
+ * 笔刷：两行，一行标注、一行改错。每行横向滑动，不折行。
+ * 每组只占一行高度，底部才不会把棋盘挤没。
+ */
+.palette { display: flex; flex-direction: column; gap: 6px; }
 .brushrow {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px; border-radius: 12px;
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 5px; border-radius: 10px;
   border: 1px solid transparent; transition: .15s;
 }
 .brushrow__label {
-  flex: 0 0 auto; width: 30px; text-align: center;
-  font-size: 10px; line-height: 1.25; color: var(--faint); font-weight: 600;
+  flex: 0 0 auto; width: 26px; text-align: center;
+  font-size: 10px; line-height: 1.2; color: var(--faint); font-weight: 600;
 }
 /* 改错行用暖色主题，和标注行一眼分开 */
-.brushrow--fix { border-color: rgba(255, 176, 32, .28); background: rgba(255, 176, 32, .05); }
+.brushrow--fix { border-color: rgba(255, 176, 32, .22); background: rgba(255, 176, 32, .04); }
 .brushrow--fix .brushrow__label { color: var(--amber); }
-.palette.fix-mode .brushrow--fix { border-color: var(--amber); background: rgba(255, 176, 32, .1); }
-.palette.fix-mode > .brushrow--annotate { opacity: .45; }
+.palette.fix-mode .brushrow--fix { border-color: var(--amber); background: rgba(255, 176, 32, .09); }
+.palette.fix-mode > .brushrow--annotate { opacity: .4; }
 
-.brushgrid {
+.brushstrip {
   flex: 1; min-width: 0;
-  display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px;
+  display: flex; gap: 5px;
+  overflow-x: auto; scrollbar-width: none;
+  padding-bottom: 2px;
 }
+.brushstrip::-webkit-scrollbar { display: none; }
 .brush {
-  width: 100%; height: 48px; border-radius: 10px;
+  flex: 0 0 auto; width: 44px; height: 46px; border-radius: 10px;
   border: 1.5px solid var(--line); background: var(--panel2);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 0; gap: 1px; position: relative;
 }
-.brush .g { font-size: 18px; font-weight: 700; line-height: 1; }
+.brush .g { font-size: 17px; font-weight: 700; line-height: 1; }
 .brush .cnt { font-size: 8.5px; line-height: 1; color: var(--ok); font-weight: 600; min-height: 8px; }
 .brush.r .g { color: var(--red); }
 .brush.b .g { color: var(--cyan); }
@@ -498,12 +517,21 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
   flex: 0 0 auto;
   background: var(--panel);
   border-top: 1px solid var(--line2);
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
   box-shadow: 0 -8px 24px rgba(0, 0, 0, .28);
 }
-.brushbar .palette { gap: 7px; }
+.brushbar .palette { gap: 5px; }
 /* 底部条里的按钮更紧凑 */
-.brushbar .btnrow { gap: 6px; }
-.brushbar .btnrow > button { padding: 7px 9px; font-size: 12px; }
+.brushbar .btnrow { gap: 5px; margin-bottom: 5px; }
+.brushbar .btnrow > button { padding: 7px 8px; font-size: 12px; }
 .brushbar .btnrow { flex-wrap: nowrap; }
 .brushbar .btnrow > button:not(.sm):not(.ghost) { flex: 1 1 0; min-width: 0; }
+
+/* 底部工具条：一行横向滑动，比摊成两行省一大截高度 */
+.toolstrip {
+  display: flex; gap: 5px; align-items: center;
+  overflow-x: auto; scrollbar-width: none;
+  padding-bottom: 2px; margin-bottom: 5px;
+}
+.toolstrip::-webkit-scrollbar { display: none; }
+.toolstrip > button { flex: 0 0 auto; }

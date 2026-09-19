@@ -193,21 +193,21 @@
     </div>
 
     <!-- 操作按钮不滚动：标注时要能随时点，滚出屏幕就得先滑回去 -->
-    <!-- 标定相关 -->
-    <div class="btnrow mb6">
-      <button id="btnCalib" class="primary">框选棋盘</button>
+    <!--
+      工具按钮压缩成两行，并横向滑动 ——
+      原来摊成两行不滚动，把棋盘压得只剩一小块。
+    -->
+    <div class="toolstrip">
+      <button id="btnCalib" class="primary sm">框选棋盘</button>
       <button id="btnAuto" class="sm">校正</button>
       <button id="btnNudge" class="sm">微调</button>
+      <button id="btnPreLabel" class="sm">预标注</button>
+      <button id="btnCheckModel" class="sm">对比模型</button>
+      <button id="btnCopyPrev" class="sm">复制上局</button>
       <button id="btnZoomOut" class="sm">－</button>
       <span id="zoomLabel" class="tiny muted" style="min-width:30px;text-align:center">1.0×</span>
       <button id="btnZoomIn" class="sm">＋</button>
       <button id="btnZoomFit" class="sm ghost">适应</button>
-    </div>
-    <!-- 标注与纠错相关 -->
-    <div class="btnrow mb6">
-      <button id="btnPreLabel" class="sm">预标注</button>
-      <button id="btnCopyPrev" class="sm">复制上局</button>
-      <button id="btnCheckModel" class="sm">对比模型</button>
       <button id="btnPinMode" class="sm ghost">取空位</button>
       <button id="btnPinClear" class="sm ghost">清空位</button>
       <button id="btnClearCells" class="sm danger-ghost">清空</button>
