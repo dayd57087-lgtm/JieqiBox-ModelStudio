@@ -20,17 +20,28 @@
   // c = 主色，用来把「这一格被标成了什么」一眼画出来。
   // 以前所有标记都是同一个绿圈，看不出标的是红子还是黑子，
   // 只能靠读圈里的字来判断，核对时很费眼。
+  // c = 标记色。
+  //
+  // 配色原则：**靠色相区分，不靠明度**。
+  // 之前红子用暗红、黑子用浅灰、暗子用中灰 —— 后两者只差明度，
+  // 压在木色棋盘上（本身是中间调）就更分不清了。
+  // 现在三方色相彻底拉开：红 / 青 / 琥珀，任何底色上都能一眼分辨。
+  var COLOR_RED = '#ff3b5c';    // 红方
+  var COLOR_BLACK = '#3ddcff';  // 黑方（用青色，和红、和木色都拉得很开）
+  var COLOR_DARK = '#ffb020';   // 暗子
+  var COLOR_EMPTY = '#6b7684';
+
   var CLASSES = [
-    { id: 'empty', g: '空', k: 'e', c: '#6b7684' },
-    { id: 'r_general', g: '帅', k: 'r', c: '#e5555f' }, { id: 'r_advisor', g: '仕', k: 'r', c: '#e5555f' },
-    { id: 'r_elephant', g: '相', k: 'r', c: '#e5555f' }, { id: 'r_horse', g: '马', k: 'r', c: '#e5555f' },
-    { id: 'r_chariot', g: '车', k: 'r', c: '#e5555f' }, { id: 'r_cannon', g: '炮', k: 'r', c: '#e5555f' },
-    { id: 'r_soldier', g: '兵', k: 'r', c: '#e5555f' },
-    { id: 'b_general', g: '将', k: 'b', c: '#cbd3dd' }, { id: 'b_advisor', g: '士', k: 'b', c: '#cbd3dd' },
-    { id: 'b_elephant', g: '象', k: 'b', c: '#cbd3dd' }, { id: 'b_horse', g: '马', k: 'b', c: '#cbd3dd' },
-    { id: 'b_chariot', g: '车', k: 'b', c: '#cbd3dd' }, { id: 'b_cannon', g: '炮', k: 'b', c: '#cbd3dd' },
-    { id: 'b_soldier', g: '卒', k: 'b', c: '#cbd3dd' },
-    { id: 'dark', g: '暗', k: 'd', c: '#8b94a1' }
+    { id: 'empty', g: '空', k: 'e', c: COLOR_EMPTY },
+    { id: 'r_general', g: '帅', k: 'r', c: COLOR_RED }, { id: 'r_advisor', g: '仕', k: 'r', c: COLOR_RED },
+    { id: 'r_elephant', g: '相', k: 'r', c: COLOR_RED }, { id: 'r_horse', g: '马', k: 'r', c: COLOR_RED },
+    { id: 'r_chariot', g: '车', k: 'r', c: COLOR_RED }, { id: 'r_cannon', g: '炮', k: 'r', c: COLOR_RED },
+    { id: 'r_soldier', g: '兵', k: 'r', c: COLOR_RED },
+    { id: 'b_general', g: '将', k: 'b', c: COLOR_BLACK }, { id: 'b_advisor', g: '士', k: 'b', c: COLOR_BLACK },
+    { id: 'b_elephant', g: '象', k: 'b', c: COLOR_BLACK }, { id: 'b_horse', g: '马', k: 'b', c: COLOR_BLACK },
+    { id: 'b_chariot', g: '车', k: 'b', c: COLOR_BLACK }, { id: 'b_cannon', g: '炮', k: 'b', c: COLOR_BLACK },
+    { id: 'b_soldier', g: '卒', k: 'b', c: COLOR_BLACK },
+    { id: 'dark', g: '暗', k: 'd', c: COLOR_DARK }
   ];
   var LABEL_IDS = CLASSES.map(function (c) { return c.id; });
   var NC = CLASSES.length;
@@ -165,6 +176,8 @@
   var mode = 'paint';       // paint | draw | nudge
   var brush = 0;            // 当前笔刷的类别索引
   var drawStart = null, drawNow = null, nudgeRef = null;
+  // 「取空位」模式：让用户直接指定哪几处是干净木板，作为生成模板的贴图来源
+  var pinMode = false;
   var grayCache = { key: null, gray: null, w: 0, h: 0 };
   var model = null, inSize = 32, stopFlag = false;
 
@@ -477,49 +490,270 @@
   //   3. 在新画布上按抖动过的位置/缩放出棋盘，再随机摆子
   // 这样生成出来的样本和用户实际看到的一致，训练数据才有意义。
 
-  var SPR = 96;   // 棋子图样的边长
+  var SPR = 96;    // 棋子图样的边长
+  var SPR_K = 1.16; // 取图样/贴图样的范围 = 格子间距 × 这个系数
 
-  /** 用空格子的图块盖住有子的格子，得到没有棋子的棋盘底 */
-  function makeCleanBoard(img, lat, cells) {
+  /**
+   * 得到一块没有棋子的棋盘底。
+   *
+   * 之前的做法是「用最近空格子的图块盖住有子的格子」，有两个毛病：
+   *   1. 图块只有一格宽，而真实对局里棋子往往和格子间距差不多大、还带投影，
+   *      边缘会留下一圈残影；
+   *   2. 木纹被切成一格一格的补丁，接缝是硬的，看上去就是花的。
+   *
+   * 现在改成：以有子的交叉点为中心，把另一处**整片干净区域**贴上去，
+   * 贴的范围比棋子大、边缘做径向羽化，所以既盖得干净也看不出接缝。
+   * 来源只从「周围一格内没有棋子、且不在最外圈」的交叉点里挑 ——
+   * 最外圈的交叉点带着棋盘边框，复制到中间会很突兀。
+   */
+  function makeCleanBoard(img, lat, cells, pins) {
     var dx = lat.dx, dy = lat.dy;
-    var bw = Math.round(dx * COLS), bh = Math.round(dy * ROWS);
+    // 四周各留一格余量。
+    // 之前画布正好等于棋盘范围，于是边角格子的中心正好落在画布角上 ——
+    // 补丁被裁掉一半，那块棋子的残留就成了四分之一圆弧（实测四个角都有）。
+    // 留一格余量之后，任何格子的补丁都有完整空间。
+    var MARGIN = 1;
+    /*
+     * 画布范围：从「左上交叉点再往左上 MARGIN 个格距」开始，
+     * 到「右下交叉点再往右下 MARGIN 个格距」结束。
+     *
+     * 之前这里写成 `x0 - (0.5 + MARGIN) * dx`，却用 `(col + MARGIN) * dx`
+     * 去定位格子 —— 两者差了半个格距，所有补丁都偏了半格，等于没盖上。
+     * 现在两边统一用 MARGIN，格子中心就是 (col + MARGIN) * dx。
+     */
+    var spanX = (COLS - 1 + MARGIN * 2) * dx;
+    var spanY = (ROWS - 1 + MARGIN * 2) * dy;
+    var ox0 = lat.x0 - MARGIN * dx;
+    var oy0 = lat.y0 - MARGIN * dy;
+    var bw = Math.round(spanX), bh = Math.round(spanY);
     var out = document.createElement('canvas');
     out.width = bw; out.height = bh;
     var c = out.getContext('2d');
-    c.drawImage(img,
-      lat.x0 - dx / 2, lat.y0 - dy / 2, dx * COLS, dy * ROWS,
-      0, 0, bw, bh);
+    c.drawImage(img, ox0, oy0, spanX, spanY, 0, 0, bw, bh);
 
-    // 收集空格子
-    var empties = [];
+    // 格子中心在画布上的位置
+    function gx(col) { return (col + MARGIN) * dx; }
+    function gy(r) { return (r + MARGIN) * dy; }
+
+    /*
+     * 找「干净来源」。
+     *
+     * clear = 到最近棋子的棋盘距离（按格数，切比雪夫距离）。
+     * 关键：**来源要按补丁半径来筛**。补丁半径是 1.05 格，
+     * 如果只要求「周围 1 格内没子」，补丁伸进隔壁格时就会把那颗子复制过来 ——
+     * 结果就是棋子"清不掉"，甚至越清越多（实测就是这个原因）。
+     * 所以至少要 clear >= 2，让补丁的覆盖范围整个落在干净区里。
+     */
+    var cands = [], wide = [], fallback = [];
+
+    /*
+     * 用户手工指定的空位优先。
+     *
+     * 自动筛选在这件事上先天不稳：它只能靠「标注说这格是空的」来推断，
+     * 而标注一旦有一处错漏，那枚棋子就会被当作干净木板复制到整块盘上。
+     * 换成一个按钮让用户点一下「这里确实是空木板」，问题就消失了 ——
+     * 机器不擅长的事，交给眼睛。
+     */
+    if (pins && pins.length) {
+      for (var pi = 0; pi < pins.length; pi++) {
+        var pIdx = pins[pi];
+        var pr = Math.floor(pIdx / COLS), pc = pIdx % COLS;
+        if (cells[pIdx]) continue;   // 用户标的是有子的格，忽略
+        // 只用指定格本身，并**真正算一遍**它周围有多干净。
+        // 之前图省事给个 clear=9，还把周围 3×3 一起收了进来 ——
+        // 那些邻格贴着棋子，补丁一伸过去就把棋子复制开了。
+        var pclear = 99;
+        for (var r2 = 0; r2 < ROWS; r2++) {
+          for (var c2 = 0; c2 < COLS; c2++) {
+            if (!cells[r2 * COLS + c2]) continue;
+            var pd = Math.max(Math.abs(r2 - pr), Math.abs(c2 - pc));
+            if (pd < pclear) pclear = pd;
+          }
+        }
+        // 只要紧邻一圈没有子就可用：补丁半径会按「到最近棋子的距离」收紧，
+        // 不硬性要求两格（那样在密集局面里几乎找不到位置）。
+        if (pclear >= 1) cands.push({ r: pr, c: pc, clear: pclear, fromPin: true });
+        else log('空位 (' + pr + ',' + pc + ') 紧邻就有棋子，跳过');
+      }
+    }
+    if (pins && pins.length && !cands.length) {
+      out.__needPins = true;
+      return out;
+    }
+    if (cands.length) {
+      // 有可用的手工空位就不再自动推断
+    } else
     for (var r = 0; r < ROWS; r++) {
       for (var col = 0; col < COLS; col++) {
-        if (!cells[r * COLS + col]) empties.push({ r: r, c: col });
-      }
-    }
-    if (!empties.length) return out;   // 全是子，没法清，原样返回
+        if (cells[r * COLS + col]) continue;
+        var item = { r: r, c: col, clear: 99 };
+        fallback.push(item);
 
-    for (var r2 = 0; r2 < ROWS; r2++) {
-      for (var c2 = 0; c2 < COLS; c2++) {
-        if (!cells[r2 * COLS + c2]) continue;
-        // 找最近的空格子：同一行/列优先，格子线的走向才对得上
-        var best = empties[0], bestD = 1e9;
-        for (var k = 0; k < empties.length; k++) {
-          var d = Math.abs(empties[k].r - r2) + Math.abs(empties[k].c - c2);
-          if (d < bestD) { bestD = d; best = empties[k]; }
+        var clear = 99;
+        for (var r2 = 0; r2 < ROWS; r2++) {
+          for (var c2 = 0; c2 < COLS; c2++) {
+            if (!cells[r2 * COLS + c2]) continue;
+            var d = Math.max(Math.abs(r2 - r), Math.abs(c2 - col));
+            if (d < clear) clear = d;
+          }
         }
-        c.drawImage(out,
-          Math.round(best.c * dx), Math.round(best.r * dy), Math.round(dx), Math.round(dy),
-          Math.round(c2 * dx), Math.round(r2 * dy), Math.round(dx), Math.round(dy));
+        item.clear = clear;
+        // 排除最外圈：贴近棋盘边缘的格子往往混进了「棋盘外的背景」，
+        // 拿它当来源会把深色背景复制到整块盘上（表现为大片黑色弧形）。
+        var inner = r > 0 && r < ROWS - 1 && col > 0 && col < COLS - 1;
+        if (clear >= 2 && inner) cands.push(item);
+        else if (clear >= 1 && inner) wide.push(item);
+        else if (clear >= 1) wide.push(item);
       }
     }
+    /*
+     * 只有「周围两格都干净」的格子才能当来源。
+     *
+     * 原因是几何上绕不开的：棋子直径≈一个格距，补丁又必须盖住整颗棋子，
+     * 所以补丁半径必然接近一格 —— 只要来源旁边一格有子，补丁就会把那颗子复制过来。
+     *
+     * 以前找不到干净来源时会退回用 wide / fallback，结果是**静默地产出脏棋盘底**，
+     * 用户看到的是"棋盘上到处是鬼影"却不知道哪里错了。
+     * 现在宁可不做：返回一个标记，让上层提示用户手工指定空位。
+     */
+    if (!cands.length) {
+      out.__needPins = true;
+      return out;
+    }
+
+    /*
+     * 再校验一遍来源：把「图块里其实有棋子」的剔掉。
+     *
+     * 为什么需要：来源是按标注筛的，而标注可能有错漏 ——
+     * 某个格子标成空、实际却有子，那枚棋子就会被当成干净的木板
+     * 复制到整块棋盘上（表现为到处是同样的圆弧）。
+     * 判据用「图块自身的明暗起伏」：纯木板很平，带棋子就有圆盘边缘。
+     * 取所有候选中位数，明显高于中位数的剔掉 —— 不用拍脑袋定阈值。
+     */
+    (function rejectDirtySources() {
+      var probe = document.createElement('canvas');
+      var PS = 24;
+      probe.width = PS; probe.height = PS;
+      var pcx = probe.getContext('2d', { willReadFrequently: true });
+      var scores = [];
+      for (var i = 0; i < cands.length; i++) {
+        var cd = cands[i];
+        var qx = lat.x0 + cd.c * dx, qy = lat.y0 + cd.r * dy;
+        var half = Math.max(dx, dy) * 0.42;
+        pcx.clearRect(0, 0, PS, PS);
+        pcx.drawImage(img, qx - half, qy - half, half * 2, half * 2, 0, 0, PS, PS);
+        var dd = pcx.getImageData(0, 0, PS, PS).data;
+        var sum = 0, sum2 = 0, n = 0;
+        for (var k = 0; k < dd.length; k += 4) {
+          var lu = dd[k] * 0.299 + dd[k + 1] * 0.587 + dd[k + 2] * 0.114;
+          sum += lu; sum2 += lu * lu; n++;
+        }
+        var mean = sum / n;
+        cd.spread = Math.sqrt(Math.max(0, sum2 / n - mean * mean));
+        scores.push(cd.spread);
+      }
+      scores.sort(function (a, b) { return a - b; });
+      var med = scores[Math.floor(scores.length / 2)] || 0;
+      if (med <= 0.5) return;                    // 整片都很平，不折腾
+      var limit = med * 1.8;
+      var kept = cands.filter(function (cd) { return cd.spread <= limit; });
+      if (kept.length >= 4) cands = kept;        // 别把候选取空了
+    })();
+
+    /*
+     * 补丁大小与羽化。
+     *
+     * 只贴一格大小会留下两个明显痕迹：网格线接不上、木纹有硬接缝，
+     * 整块棋盘看上去是「花的」。
+     * 这里用比一格更大的范围，并且内圈不透明区留得小、羽化区留得宽，
+     * 相邻补丁之间是渐变过渡而不是硬边。
+     */
+    /*
+     * 半径与实心区 —— 这里有个绕不开的几何约束。
+     *
+     * 棋子直径≈一个格距（实测 0.94 格），所以补丁的实心半径至少 0.5 格才盖得住；
+     * 而补丁不能伸到隔壁格子的棋子上去，隔壁棋子的边缘在 1.0−0.47=0.53 格处。
+     * 两个条件夹出的窗口很窄：实心区只能取 0.50~0.53 格。
+     *
+     * 所以：实心区固定 0.50 格，外面留一点点羽化（0.50→0.62）把接缝糊掉。
+     * 再大就会吃到邻格的棋子 —— 之前设 0.74 时，棋盘底上全是半透明的棋子残影，
+     * 就是这个原因。
+     */
+    var R = Math.max(dx, dy) * 0.56;
+    var RIN = R * 0.89;   // 实心 0.50 格，羽化只留 0.06 格
+    var SIDE = Math.ceil(R * 2) + 2;
+
+    var patch = document.createElement('canvas');
+    patch.width = SIDE; patch.height = SIDE;
+    var pctx = patch.getContext('2d');
+
+    /* 取每行的空格子，用来优先选「同一行」的来源 ——
+       同一行里木纹走向连续，比跨行取自然得多。 */
+    var emptyByRow = [];
+    for (var rr = 0; rr < ROWS; rr++) {
+      emptyByRow.push(cands.filter(function (cd) { return cd.r === rr; }));
+    }
+
+    for (var r4 = 0; r4 < ROWS; r4++) {
+      for (var c4 = 0; c4 < COLS; c4++) {
+        if (!cells[r4 * COLS + c4]) continue;
+
+        // 来源排序：同行优先，其次看周围有多干净，最后取近的
+        var pool = emptyByRow[r4] && emptyByRow[r4].length ? emptyByRow[r4] : cands;
+        var ranked = pool.slice().sort(function (a, b) {
+          var da = Math.abs(a.r - r4) + Math.abs(a.c - c4);
+          var db = Math.abs(b.r - r4) + Math.abs(b.c - c4);
+          return (b.clear * 8 - db) - (a.clear * 8 - da);
+        });
+        // 取最靠前的几个做混合，单个来源会带进它自己的木纹特征
+        var picks = ranked.slice(0, 4);
+
+        pctx.setTransform(1, 0, 0, 1, 0, 0);
+        pctx.globalCompositeOperation = 'source-over';
+        pctx.globalAlpha = 1;
+        pctx.clearRect(0, 0, SIDE, SIDE);
+
+        // 第一个铺满，其余的以低透明度叠上去 —— 相当于把几处木纹平均一下，
+        // 接缝处就不会各说各话
+        for (var q = 0; q < picks.length; q++) {
+          var srcQ = picks[q];
+          var qx = lat.x0 + srcQ.c * dx, qy = lat.y0 + srcQ.r * dy;
+          pctx.globalAlpha = q === 0 ? 1 : 0.34;
+          pctx.drawImage(img, qx - R, qy - R, R * 2, R * 2, 0, 0, SIDE, SIDE);
+        }
+        pctx.globalAlpha = 1;
+
+        // 径向羽化：中心实、边缘虚
+        var g = pctx.createRadialGradient(SIDE / 2, SIDE / 2, RIN, SIDE / 2, SIDE / 2, R);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(0.7, 'rgba(0,0,0,0.92)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        pctx.globalCompositeOperation = 'destination-in';
+        pctx.fillStyle = g;
+        pctx.fillRect(0, 0, SIDE, SIDE);
+        pctx.globalCompositeOperation = 'source-over';
+
+        c.drawImage(patch, Math.round(gx(c4) - SIDE / 2), Math.round(gy(r4) - SIDE / 2));
+      }
+    }
+
+    out.__margin = MARGIN;   // 调用方要知道余量才能摆对位置
+    out.__dbg = { cands: cands.length, fallback: fallback.length,
+                  pieces: (function(){var n=0;for(var i=0;i<CELLS;i++)if(cells[i])n++;return n;})() };
     return out;
   }
 
-  /** 从模板里抠出每种棋子的图样；模板里没有的类别用内置画法补上 */
+  /**
+   * 从模板里抠出每种棋子的图样；模板里没有的类别用内置画法补上。
+   *
+   * 取的范围比一格间距大一点：真实棋子常见和间距差不多大，
+   * 按一格取会把棋子的边缘切掉。外圈径向羽化到透明，
+   * 所以取进来的邻居棋子/背景在角落处已经被淡掉了。
+   */
   function extractSprites(img, lat, cells) {
     var sprites = new Array(NC).fill(null);
-    var side = Math.max(lat.dx, lat.dy);
+    var K = SPR_K;                      // 取图范围 = 间距 × K
+    var side = Math.max(lat.dx, lat.dy) * K;
 
     for (var i = 0; i < CELLS; i++) {
       var cls = cells[i];
@@ -531,17 +765,16 @@
       var sc = document.createElement('canvas');
       sc.width = SPR; sc.height = SPR;
       var sctx2 = sc.getContext('2d');
-      // 圆形羽化遮罩：棋子本身接近正圆，羽化边缘让它压到新底上不留硬边
+
+      // 先按圆形羽化铺一层遮罩，再把棋子画进去（source-in 只保留重叠部分）
       var g = sctx2.createRadialGradient(
-        SPR / 2, SPR / 2, SPR * 0.36,
-        SPR / 2, SPR / 2, SPR * 0.47
+        SPR / 2, SPR / 2, SPR * 0.42,
+        SPR / 2, SPR / 2, SPR * 0.53
       );
       g.addColorStop(0, 'rgba(0,0,0,1)');
       g.addColorStop(1, 'rgba(0,0,0,0)');
-      sctx2.beginPath();
-      sctx2.rect(0, 0, SPR, SPR);
       sctx2.fillStyle = g;
-      sctx2.fill();
+      sctx2.fillRect(0, 0, SPR, SPR);
       sctx2.globalCompositeOperation = 'source-in';
       sctx2.drawImage(img,
         cx - side / 2, cy - side / 2, side, side,
@@ -555,14 +788,29 @@
       if (sprites[k]) continue;
       var cv = document.createElement('canvas');
       cv.width = SPR; cv.height = SPR;
-      drawPieceDemo(cv.getContext('2d'), SPR / 2, SPR / 2, SPR * 0.94, k);
+      // 内置画法的直径按同样的比例：SPR * (1/K) * 0.94
+      drawPieceDemo(cv.getContext('2d'), SPR / 2, SPR / 2, (SPR / K) * 0.94, k);
       sprites[k] = cv;
     }
     return sprites;
   }
 
   async function generateFromTemplate(s, n) {
-    if (!s || !s.lattice) throw new Error('这张图还没标定，先在标注页框选棋盘');
+    if (!s || !s.lattice) throw new Error('这张图还没标定 —— 先到「标注」页框选棋盘');
+
+    // 模板的标定准不准，直接决定棋盘底重建得干不干净：偏一两个像素，
+    // 补丁就会错位，棋子残影会留在棋盘上。自动标定（置信度通常 4~6）不够准，
+    // 所以这里先自动精修一遍 —— 与其只提醒用户去手动校正，不如直接做掉。
+    if (s.conf < 20) {
+      log('模板置信度偏低（' + fmt(s.conf, 1) + '），先自动精修一次…');
+      if (await refineLattice(s)) {
+        log('精修完成，置信度 ' + fmt(s.conf, 1));
+        await dbPut(toRecord(s));
+      } else {
+        log('精修失败，沿用原标定');
+      }
+    }
+
     var img = await imageOf(s);
 
     var lat = {
@@ -574,8 +822,19 @@
       : null;
 
     var clean = null, sprites = null;
+    var pins = s.pins && s.pins.length ? s.pins.slice() : null;
+    if (pins) log('使用手工指定的 ' + pins.length + ' 处空位作为贴图来源');
     if (srcCells) {
-      clean = makeCleanBoard(img, lat, srcCells);
+      clean = makeCleanBoard(img, lat, srcCells, pins);
+      if (clean.__needPins) {
+        var msg = pins
+          ? '指定的空位周围还有棋子，没法当作干净木板。换几处再试（要选周围一圈都没子的地方）。'
+          : '这张图里找不到「周围两格都没有棋子」的位置，自动重建棋盘底做不了。' +
+            '请点「取空位」，在确定没子的地方点几处，再生成。';
+        log('棋盘底重建中止：' + msg);
+        toast(msg, 5200);
+        return 0;
+      }
       sprites = extractSprites(img, lat, srcCells);
       log('已从模板提取：棋盘底 ' + clean.width + '×' + clean.height +
           ' · 棋子图样 ' + sprites.filter(Boolean).length + ' 种');
@@ -615,7 +874,23 @@
                                        H - Math.min(H, oy + bh + 6));
 
       if (clean) {
-        c.drawImage(clean, ox, oy, bw, bh);
+        // 干净底的左上角是「左上交叉点往左上 MARGIN 格」，
+        // 而 ox/oy 指的就是左上交叉点，所以整体往左上挪 MARGIN 格。
+        /*
+         * 只取棋盘本体，丢掉那圈余量。
+         *
+         * 余量是给补丁留完整空间的，本身是「棋盘外的深色背景 + 补丁的圆弧边」，
+         * 直接贴上去会在棋盘四周留下一圈扇贝形花边。
+         * 干净底里，棋盘木面从 (m-0.5) 格开始、宽 (COLS-1+1) 格。
+         */
+        var m = clean.__margin || 1;
+        // 干净底的建库尺度：一格 = 干净底宽 / (COLS - 1 + 2m)
+        var cdx = clean.width / (COLS - 1 + m * 2);
+        var cdy = clean.height / (ROWS - 1 + m * 2);
+        var scx = (m - 0.5) * cdx, scy = (m - 0.5) * cdy;
+        var scw = COLS * cdx, sch = ROWS * cdy;
+        c.drawImage(clean, scx, scy, scw, sch,
+                    ox, oy, dx2 * COLS, dy2 * ROWS);
       } else {
         // 模板没标注时退化成内置棋盘，至少比例是对的
         if (!boardImg) boardImg = await loadImage('xiangqi.png');
@@ -638,8 +913,10 @@
         var cls = pickClass(srcCells);
         cells[cell] = cls;
         if (sprites) {
+          // 图样是按「间距 × K」的范围抠出来的，贴回去也要用同一个 K，
+          // 否则棋子会被缩放，和模板里的实际大小对不上。
           var sp = sprites[cls];
-          var side = Math.max(dx2, dy2) * 0.94;
+          var side = Math.max(dx2, dy2) * SPR_K;
           c.drawImage(sp,
             ox + cc * dx2 + dx2 / 2 - side / 2,
             oy + rr * dy2 + dy2 / 2 - side / 2,
@@ -735,22 +1012,10 @@
     // 而 view.key 一旦落定，等图真的加载好反而不会再重新取景，NaN 就留下来了。
     if (!stageImg.complete || !stageImg.naturalWidth) return;
 
-    // 舞台盒子：高度约占视口一半，保证笔刷和按钮始终留在屏幕上
-    var wrapW = $('tab-annotate').clientWidth - 22;
-    if (wrapW < 80) wrapW = window.innerWidth - 22;
-    var boxW = Math.round(Math.min(wrapW, 560));
-    var boxH = Math.round(clamp(window.innerHeight * 0.5, 240, 470));
-
-    dpr = window.devicePixelRatio || 1;
-    stage.style.width = boxW + 'px';
-    stage.style.height = boxH + 'px';
-    stage.width = Math.round(boxW * dpr);
-    stage.height = Math.round(boxH * dpr);
-    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    sctx.clearRect(0, 0, boxW, boxH);
-
     var IW = stageImg.naturalWidth, IH = stageImg.naturalHeight;
-    var pad = 0.7;   // 棋盘四周留出这么多格的余量
+    var pad = 0.35;   // 棋盘四周留出的余量（单位：格）
+
+    // 棋盘在图片里的实际范围（含余量）
     var fr = s.lattice
       ? {
         x: (s.lattice.x0 - s.lattice.dx * pad) * IW,
@@ -759,6 +1024,43 @@
         h: s.lattice.dy * (ROWS - 1 + pad * 2) * IH
       }
       : { x: 0, y: 0, w: IW, h: IH };
+
+    /*
+     * 舞台盒子按棋盘的长宽比来定，而不是固定成「视口高度的一半」。
+     *
+     * 棋盘本身是竖长的（10 行 × 9 列）再加余量，塞进一个比例不匹配的盒子里，
+     * 短边会把整块棋盘压小，另一边留一大片空白 —— 格子只有 34px，点起来费劲。
+     * 这里让盒子贴合棋盘比例：优先铺满宽度，高度不够就退回按高度定宽。
+     */
+    var wrapW = $('tab-annotate').clientWidth - 22;
+    if (wrapW < 80) wrapW = window.innerWidth - 22;
+    var maxW = Math.min(wrapW, 620);
+    // 上方还有文件名卡片和文件列表，下方是笔刷与按钮，给它们留够位置
+    var maxH = Math.round(clamp(window.innerHeight * 0.56, 260, 620));
+
+    var aspect = fr.h / fr.w;
+    var boxW, boxH;
+    if (maxW * aspect <= maxH) {
+      boxW = Math.round(maxW);
+      boxH = Math.round(maxW * aspect);
+    } else {
+      boxH = Math.round(maxH);
+      boxW = Math.round(maxH / aspect);
+    }
+    boxW = Math.max(160, boxW);
+    boxH = Math.max(160, boxH);
+    view.debug = {
+      frW: Math.round(fr.w), frH: Math.round(fr.h),
+      aspect: aspect.toFixed(3), maxW: maxW, maxH: maxH
+    };
+
+    dpr = window.devicePixelRatio || 1;
+    stage.style.width = boxW + 'px';
+    stage.style.height = boxH + 'px';
+    stage.width = Math.round(boxW * dpr);
+    stage.height = Math.round(boxH * dpr);
+    sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    sctx.clearRect(0, 0, boxW, boxH);
 
     // 手机截图里棋盘往往只占屏幕一部分。按整图缩放的话格子只剩三十来像素，
     // 点不准；所以标定之后改成「取景框住棋盘」，格子能到 36px 上下，再叠加缩放。
@@ -785,6 +1087,7 @@
       drawLattice(s.lattice, S);
       if (showPred && lastPred) drawPredMarks(s, lastPred, S);
       else drawMarkers(s, S);
+      drawPins(s, S);
     }
     if (mode === 'draw' && drawStart && drawNow) drawRough(drawStart, drawNow, S);
     sctx.restore();
@@ -867,16 +1170,19 @@
   /**
    * 画标注标记。
    *
-   * 颜色按阵营走：红子暖红、黑子冷白、暗子灰。
-   * 模型预标注出来的格子（s.auto[i] 为真且用户还没动过）画成虚线环，
-   * 提醒「这一格是模型猜的，还没人核对过」。
+   * 分三层，保证压在任何棋盘底色、任何棋子上都清晰：
+   *   1. 半透明暗底 —— 把底下的棋子压暗，标记本身成为视觉主体
+   *   2. 阵营色粗环 —— 颜色即阵营，不用读字也能分辨
+   *   3. 阵营色字符 —— 具体是哪个子
+   *
+   * 模型预标注的格子（auto）画虚线环，人手确认过的是实线。
    */
   function drawMarkers(s, S) {
     if (!s.lattice || !s.cells) return;
     var IW = view.imgW, IH = view.imgH;
     var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
     var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
-    var R = Math.min(dx, dy) * 0.3;
+    var R = Math.min(dx, dy) * 0.33;
 
     for (var r = 0; r < ROWS; r++) {
       for (var c = 0; c < COLS; c++) {
@@ -887,25 +1193,47 @@
         var col = CLASSES[v].c;
         var cx = x0 + c * dx, cy = y0 + r * dy;
 
-        // 底：半透明填充，压住底下的棋子但仍看得见轮廓
+        // 1) 暗底衬
         sctx.beginPath();
         sctx.arc(cx, cy, R, 0, Math.PI * 2);
-        sctx.fillStyle = hexA(col, auto ? 0.22 : 0.3);
+        sctx.fillStyle = 'rgba(8,10,14,' + (auto ? 0.52 : 0.62) + ')';
         sctx.fill();
 
-        // 环：模型猜的用虚线，人工确认的用实线
-        sctx.lineWidth = (auto ? 2 : 2.6) / S;
-        if (auto) sctx.setLineDash([3 / S, 2.5 / S]);
+        // 2) 阵营色环
+        sctx.lineWidth = 3 / S;
+        if (auto) sctx.setLineDash([3.5 / S, 2.5 / S]);
         sctx.strokeStyle = col;
         sctx.stroke();
         sctx.setLineDash([]);
 
-        // 字
+        // 3) 字符
         sctx.fillStyle = col;
-        sctx.font = 'bold ' + Math.round(R * 1.15) + 'px "PingFang SC",serif';
+        sctx.font = 'bold ' + Math.round(R * 1.12) + 'px "PingFang SC",serif';
         sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
         sctx.fillText(CLASSES[v].g, cx, cy);
       }
+    }
+  }
+
+  /** 「取空位」模式下手工指定的干净木板，画成白色菱形 */
+  function drawPins(s, S) {
+    if (!s.lattice || !s.pins || !s.pins.length) return;
+    var IW = view.imgW, IH = view.imgH;
+    var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
+    var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
+    var R = Math.min(dx, dy) * 0.3;
+    for (var k = 0; k < s.pins.length; k++) {
+      var idx = s.pins[k];
+      var r = Math.floor(idx / COLS), c = idx % COLS;
+      var cx = x0 + c * dx, cy = y0 + r * dy;
+      sctx.save();
+      sctx.translate(cx, cy);
+      sctx.rotate(Math.PI / 4);
+      sctx.beginPath();
+      sctx.rect(-R * 0.62, -R * 0.62, R * 1.24, R * 1.24);
+      sctx.fillStyle = 'rgba(255,255,255,.9)';
+      sctx.fill();
+      sctx.restore();
     }
   }
 
@@ -917,7 +1245,7 @@
     return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
   }
 
-  /** 画布左上角的阵营图例 */
+  /** 阵营图例（放在画布下方，不遮棋盘） */
   function renderLegend(s) {
     var el = $('legend');
     if (!el) return;
@@ -932,40 +1260,16 @@
       }
     }
     var parts = [];
-    if (counts.r) parts.push('<span class="lg"><i style="background:#e5555f"></i>红 ' + counts.r + '</span>');
-    if (counts.b) parts.push('<span class="lg"><i style="background:#cbd3dd"></i>黑 ' + counts.b + '</span>');
-    if (counts.d) parts.push('<span class="lg"><i style="background:#8b94a1"></i>暗 ' + counts.d + '</span>');
-    if (counts.auto) parts.push('<span class="lg"><i style="background:#e0a33a"></i>模型猜 ' + counts.auto + '</span>');
+    if (counts.r) parts.push('<span class="lg"><i style="background:' + COLOR_RED +
+      '"></i>红方 ' + counts.r + '</span>');
+    if (counts.b) parts.push('<span class="lg"><i style="background:' + COLOR_BLACK +
+      '"></i>黑方 ' + counts.b + '</span>');
+    if (counts.d) parts.push('<span class="lg"><i style="background:' + COLOR_DARK +
+      '"></i>暗子 ' + counts.d + '</span>');
+    if (counts.auto) parts.push('<span class="lg warn"><i style="background:' + COLOR_DARK +
+      '"></i>模型猜 ' + counts.auto + ' · 待核对</span>');
+    if (!parts.length) parts.push('<span class="lg">还没有标注</span>');
     el.innerHTML = parts.join('');
-  }
-
-  /** 叠加显示模型预测：绿=与标注一致，红=不一致（包括「实际有子却预测成空」） */
-  function drawPredMarks(s, pred, S) {
-    var IW = view.imgW, IH = view.imgH;
-    var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
-    var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
-    var R = Math.min(dx, dy) * 0.34;
-    for (var r = 0; r < ROWS; r++) {
-      for (var c = 0; c < COLS; c++) {
-        var i = r * COLS + c;
-        var truth = s.cells ? s.cells[i] : 0;
-        var p = pred[i];
-        var wrong = p !== truth;
-        if (p === 0 && !wrong) continue;         // 两边都是空，没什么可看的
-        var cx = x0 + c * dx, cy = y0 + r * dy;
-        sctx.beginPath();
-        sctx.arc(cx, cy, R, 0, Math.PI * 2);
-        sctx.fillStyle = wrong ? 'rgba(224,82,82,.32)' : 'rgba(53,196,106,.24)';
-        sctx.fill();
-        sctx.lineWidth = (wrong ? 2.6 : 1.4) / S;
-        sctx.strokeStyle = wrong ? '#ff5a5a' : '#35c46a';
-        sctx.stroke();
-        sctx.fillStyle = wrong ? '#ffe0e0' : '#d8f5e2';
-        sctx.font = 'bold ' + Math.round(R * 1.05) + 'px "PingFang SC",serif';
-        sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
-        sctx.fillText(p === 0 ? '空' : CLASSES[p].g, cx, cy);
-      }
-    }
   }
 
   function drawRough(a, b, S) {
@@ -1148,6 +1452,17 @@
     if (!s) return -1;
     var idx = cellAt(ip);
     if (idx < 0) return -1;
+
+    // 「取空位」模式下，点格子是标记/取消一处干净木板，不改标注
+    if (pinMode) {
+      s.pins = s.pins || [];
+      var at = s.pins.indexOf(idx);
+      if (at >= 0) s.pins.splice(at, 1); else s.pins.push(idx);
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      return idx;
+    }
     s.cells = s.cells || new Array(CELLS).fill(0);
     s.cells[idx] = (s.cells[idx] === brush) ? 0 : brush;   // 同笔刷再点 = 擦掉
     // 人手点过这一格，就不再是「模型猜的」，虚线环随之变成实线
@@ -1322,7 +1637,8 @@
   function toRecord(s) {
     return {
       key: s.key, name: s.name, w: s.w, h: s.h, thumb: s.thumb, blob: s.blob,
-      lattice: s.lattice, cells: s.cells, conf: s.conf, auto: s.auto, src: s.src
+      lattice: s.lattice, cells: s.cells, conf: s.conf,
+      auto: s.auto, src: s.src, pins: s.pins
     };
   }
 
@@ -1356,6 +1672,7 @@
   function updateModeButtons() {
     $('btnCalib').classList.toggle('on', mode === 'draw');
     $('btnNudge').classList.toggle('on', mode === 'nudge');
+    if ($('btnPinMode')) $('btnPinMode').classList.toggle('on', pinMode);
   }
 
   // ---------------------------------------------------------------- 笔刷
@@ -1385,6 +1702,26 @@
     renderStage();
     toast('在棋盘上拖一个框');
   });
+  $('btnPinMode').addEventListener('click', function () {
+    var s = currentSample();
+    if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
+    pinMode = !pinMode;
+    updateModeButtons();
+    renderStage();
+    toast(pinMode
+      ? '取空位：点几处确定没有棋子的地方（白色菱形）。生成时只用这些地方当干净木板。再点一次退出。'
+      : '已退出取空位模式', pinMode ? 4200 : 1600);
+  });
+
+  $('btnPinClear').addEventListener('click', function () {
+    var s = currentSample();
+    if (!s) return;
+    s.pins = [];
+    queueSave(s);
+    renderStage();
+    toast('已清除手工空位，改回自动推断');
+  });
+
   $('btnZoomIn').addEventListener('click', function () { setZoom(view.zoom * 1.5); });
   $('btnZoomOut').addEventListener('click', function () { setZoom(view.zoom / 1.5); });
   $('btnZoomFit').addEventListener('click', function () {
@@ -1397,18 +1734,42 @@
     updateModeButtons();
     renderStage();
   });
-  $('btnAuto').addEventListener('click', function () {
-    var s = currentSample();
-    if (!s) return;
-    if (!s.lattice) { toast('先框选棋盘'); return; }
-    // 以现有晶格为中心再跑一次拟合
+  /**
+   * 以现有晶格为种子再拟合一次。
+   * 自动标定出来的格子常有 1~2 像素偏差，这一步能把它收紧到亚像素。
+   */
+  async function refineLattice(s) {
+    if (!s || !s.lattice) return false;
+    await imageOf(s);
+    var gc = grayOf(s);
+    if (!gc) return false;
     var rough = {
       x: (s.lattice.x0 - s.lattice.dx * 0.4) * s.w,
       y: (s.lattice.y0 - s.lattice.dy * 0.4) * s.h,
       w: (s.lattice.dx * 8.8) * s.w,
       h: (s.lattice.dy * 9.8) * s.h
     };
-    if (fitFromRough(rough)) { queueSave(s); renderStage(); toast('已重新校正'); }
+    var r = Lattice.fitBoard(gc.gray, gc.w, gc.h, rough);
+    if (!r.ok) return false;
+    s.lattice = { x0: r.x0 / s.w, y0: r.y0 / s.h, dx: r.dx / s.w, dy: r.dy / s.h };
+    s.conf = r.confidence;
+    s.edgeRatio = r.edgeRatio;
+    refreshThumb(s);
+    return true;
+  }
+
+  $('btnAuto').addEventListener('click', async function () {
+    var s = currentSample();
+    if (!s) return;
+    if (!s.lattice) { toast('先框选棋盘'); return; }
+    if (await refineLattice(s)) {
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      toast('已重新校正 · 置信度 ' + fmt(s.conf, 1));
+    } else {
+      toast('校正失败，试试手动框选');
+    }
   });
   // 用模型检查当前这张图：把预测叠加到棋盘上，错的格子标红
   $('btnCheckModel').addEventListener('click', async function () {
@@ -2594,6 +2955,21 @@
       renderStage();
       renderSamples();
       return true;
+    },
+    /** 导出重建出的棋盘底，供自动化核对用 */
+    cleanBoard: async function () {
+      var s = currentSample();
+      if (!s || !s.lattice) return null;
+      var img = await imageOf(s);
+      var lat = {
+        x0: s.lattice.x0 * s.w, y0: s.lattice.y0 * s.h,
+        dx: s.lattice.dx * s.w, dy: s.lattice.dy * s.h
+      };
+      var clean = makeCleanBoard(img, lat, s.cells, s.pins);
+      return { dataUrl: clean.toDataURL('image/png'), margin: clean.__margin,
+               dbg: clean.__dbg,
+               w: clean.width, h: clean.height, conf: s.conf,
+               lattice: s.lattice, cells: s.cells };
     },
     /** 标注数据，供自动化核对用 */
     cells: function () {

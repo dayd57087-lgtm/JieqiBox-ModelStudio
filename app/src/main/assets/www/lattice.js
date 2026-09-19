@@ -189,6 +189,61 @@
       step /= 4;
     }
 
+    /*
+     * 八度校正。
+     *
+     * 一维周期信号的搜索有个经典陷阱：真实周期 T 和它的半周期 T/2 都会得分很高，
+     * 因为半周期恰好穿过所有真实峰（外加它们的中点）。棋盘上这一点尤其明显 ——
+     * 棋子的上下边缘在格线两侧各约半格处形成暗带，于是「格距的一半」在投影里
+     * 也有很强的周期性。一旦拟合落到半周期上，10 条"线"只覆盖棋盘的一半，
+     * 整块棋盘就废了（实测批量标定时真的发生了：dx=99.8px / dy=50.0px）。
+     *
+     * 判据：把间距翻倍再试一次，若得分接近（>= 92%），说明 2× 才是真周期 ——
+     * 取大的那个。反过来不必试半周期，因为我们的搜索起点已经是目标间距附近。
+     */
+    (function fixOctave() {
+      // 只在「拟合出来的总跨度明显小于预期」时才怀疑是八度错误。
+      // 正常标定时拟合跨度本来就该接近 roughSpan，不该动。
+      var fittedSpan = best.spacing * (count - 1);
+      if (fittedSpan > roughSpan * 0.75) return;
+
+      var dbl = best.spacing * 2;
+      var span2 = dbl * (count - 1);
+      if (span2 > n - 1.5) return;                     // 放不下，跳过
+      var best2 = { start: best.start, spacing: dbl, score: -Infinity };
+      for (var st2 = 0.2; st2 <= n - 1.5 - span2; st2 += 1) {
+        var v2 = score(P, st2, dbl, count);
+        if (v2 > best2.score) best2 = { start: st2, spacing: dbl, score: v2 };
+      }
+      // 在得分最好的起点附近再做一次局部精修
+      var step2 = Math.max(0.5, dbl / 24);
+      for (var rd = 0; rd < 5; rd++) {
+        var imp = true;
+        while (imp) {
+          imp = false;
+          var cands2 = [
+            [best2.start + step2, dbl], [best2.start - step2, dbl],
+            [best2.start, dbl + step2], [best2.start, dbl - step2]
+          ];
+          for (var q = 0; q < cands2.length; q++) {
+            var cs2 = cands2[q][0], cp2 = cands2[q][1];
+            var sp2 = cp2 * (count - 1);
+            if (sp2 > n - 1.2 || cs2 < 0.2 || cs2 + sp2 > n - 1.2) continue;
+            var s2 = score(P, cs2, cp2, count);
+            if (s2 > best2.score + 1e-9) {
+              best2 = { start: cs2, spacing: cp2, score: s2 };
+              imp = true;
+            }
+          }
+        }
+        step2 /= 4;
+      }
+      // 2× 的得分只要接近，就认为它才是真周期
+      if (best2.score > best.score * 0.92) {
+        best = { start: best2.start, spacing: best2.spacing, score: best2.score };
+      }
+    })();
+
     // 边缘判据：真实晶格的两端之外是棋盘外的木边，不该再有格子线。
     // 若往外一格的位置上仍压着同样强的线，说明这组线只是棋盘内部的一段 ——
     // 相位错了一格。棋盘横线等距，错相位与正确相位在平均暗度上几乎一样，

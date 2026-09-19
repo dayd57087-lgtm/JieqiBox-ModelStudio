@@ -66,11 +66,15 @@
         </div>
         <button id="btnNext" class="icon">›</button>
       </div>
+      <!--
+        图例放在这里而不是画布上：棋盘通常铺满画布，
+        浮在左上角会把边路的格子盖住，正好是核对时最需要看的地方。
+      -->
+      <div id="legend" class="legendbar"></div>
     </div>
 
     <div class="stagewrap">
       <canvas id="stage"></canvas>
-      <div id="legend" class="legend"></div>
       <div id="stageHint" class="stagehint"></div>
     </div>
 
@@ -94,6 +98,12 @@
         <button id="btnCopyPrev" class="sm">复制上局</button>
         <button id="btnCheckModel" class="sm">对比模型</button>
         <button id="btnClearCells" class="sm danger-ghost">清空</button>
+      </div>
+      <!-- 模板生成要用到「哪里是干净木板」，自动推断不稳，给个手工指定的入口 -->
+      <div class="btnrow mt8">
+        <button id="btnPinMode" class="sm">取空位</button>
+        <button id="btnPinClear" class="sm ghost">清除空位</button>
+        <span class="muted tiny" style="margin-left:auto">模板生成用</span>
       </div>
     </div>
 

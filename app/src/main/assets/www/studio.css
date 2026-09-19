@@ -273,18 +273,24 @@ pre {
   color: #dde3ea;
   pointer-events: none;
 }
-.legend {
-  position: absolute; top: 8px; left: 8px;
+/* 图例：画布下方的普通一行，不浮在棋盘上 */
+.legendbar {
   display: flex; gap: 6px; flex-wrap: wrap;
-  pointer-events: none;
+  margin-top: 8px;
 }
+.legendbar:empty { display: none; }
 .lg {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: rgba(0,0,0,.6); border-radius: 6px;
-  padding: 2px 7px; font-size: 10px; backdrop-filter: blur(4px);
-  color: #d5dbe3;
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 3px 10px 3px 7px;
+  font-size: 11px; color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
-.lg i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+.lg i {
+  width: 9px; height: 9px; border-radius: 50%; display: block;
+  box-shadow: 0 0 0 1.5px rgba(0,0,0,.55);
+}
+.lg.warn { border-color: var(--warn); color: var(--warn); }
 
 /* ---------------------------------------------------------------- 笔刷 */
 .palette { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }

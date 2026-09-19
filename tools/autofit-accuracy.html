@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>自动标定精度实测</title>
+<style>body{background:#14161a;color:#e6e8eb;font:12px/1.5 ui-monospace,monospace;margin:0;padding:10px}
+pre{white-space:pre-wrap}.ok{color:#35c46a}.bad{color:#ff5a5a}.dim{color:#9aa1ad}
+canvas{display:block;width:100%;background:#000;border-radius:6px;margin:6px 0}</style>
+</head>
+<body>
+<pre id="out">运行中…</pre>
+<div id="vis"></div>
+<script src="/lattice.js"></script>
+<script>
+(async () => {
+const el = document.getElementById('out');
+let buf = ''; const log = m => { buf += m + '\n'; el.textContent = buf; };
+const ok = m => `<span class="ok">${m}</span>`;
+const bad = m => `<span class="bad">${m}</span>`;
+
+const GT = { x0:46.5, dx:(796.5-46.5)/8, y0:46.5, dy:(890.5-46.5)/9, W:844, H:938 };
+const CHAR = {1:'帅',2:'仕',3:'相',4:'马',5:'车',6:'炮',7:'兵',8:'将',9:'士',10:'象',11:'马',12:'车',13:'炮',14:'卒'};
+const COLS=9, ROWS=10, CELLS=90;
+
+function drawPiece(ctx,cx,cy,d,cls){
+  const r=d/2, red=cls<=7, isDark=cls===15;
+  ctx.beginPath();ctx.arc(cx,cy,r,0,7);ctx.fillStyle=isDark?'#6f6f6f':'#f2e3c4';ctx.fill();
+  ctx.lineWidth=Math.max(1.5,r*0.09);ctx.strokeStyle=isDark?'#2a2a2a':(red?'#c62828':'#1a1a1a');ctx.stroke();
+  ctx.beginPath();ctx.arc(cx,cy,r*0.74,0,7);ctx.lineWidth=Math.max(1,r*0.05);ctx.stroke();
+  ctx.fillStyle=isDark?'#d0d0d0':(red?'#c62828':'#1a1a1a');
+  ctx.font=`bold ${Math.round(r*1.1)}px "PingFang SC",serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(isDark?'暗':(CHAR[cls]||'?'),cx,cy);
+}
+
+const boardImg = await new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src='/xiangqi.png'});
+
+const rows = [];
+const N = 24;
+for (let t = 0; t < N; t++) {
+  const W=1080,H=2340, scale=1.0+Math.random()*0.16;
+  const ox=Math.round((W-GT.W*scale)/2+(Math.random()-0.5)*40);
+  const oy=Math.round(180+Math.random()*140);
+  const cv=document.createElement('canvas');cv.width=W;cv.height=H;
+  const c=cv.getContext('2d');
+  c.fillStyle='#2b2f36';c.fillRect(0,0,W,H);
+  c.fillStyle='#1e2127';c.fillRect(0,0,W,190);
+  c.fillStyle='#111';c.fillRect(0,H-120,W,120);
+  c.drawImage(boardImg,ox,oy,GT.W*scale,GT.H*scale);
+
+  const order=[...Array(CELLS).keys()].sort(()=>Math.random()-0.5);
+  const n=20+Math.floor(Math.random()*14);
+  for(let i=0;i<n;i++){
+    const cell=order[i], r=Math.floor(cell/COLS), col=cell%COLS;
+    const red=Math.random()<0.5, dk=Math.random()<0.3;
+    const cls=dk?15:(red?1+Math.floor(Math.random()*7):8+Math.floor(Math.random()*7));
+    drawPiece(c, ox+(GT.x0+col*GT.dx)*scale, oy+(GT.y0+r*GT.dy)*scale, GT.dx*scale, cls);
+  }
+  const truth={x0:ox+GT.x0*scale, dx:GT.dx*scale, y0:oy+GT.y0*scale, dy:GT.dy*scale};
+
+  // 灰度
+  const gc=document.createElement('canvas');gc.width=W;gc.height=H;
+  const gx=gc.getContext('2d',{willReadFrequently:true});gx.drawImage(cv,0,0);
+  const dd=gx.getImageData(0,0,W,H).data;
+  const gray=new Uint8ClampedArray(W*H);
+  for(let i=0,p=0;i<gray.length;i++,p+=4) gray[i]=dd[p]*0.299+dd[p+1]*0.587+dd[p+2]*0.114;
+
+  const fit = Lattice.fitBoardAuto(gray, W, H);
+  if (!fit || !fit.ok) { rows.push({t, fail:true}); continue; }
+
+  const ex = Math.abs(fit.x0-truth.x0), ey = Math.abs(fit.y0-truth.y0);
+  const edx = Math.abs(fit.dx-truth.dx), edy = Math.abs(fit.dy-truth.dy);
+  // 棋盘远端累计偏差（格数）
+  const farX = (ex + edx*8) / truth.dx;
+  const farY = (ey + edy*9) / truth.dy;
+  rows.push({ t, ex, ey, edx, edy, farX, farY, conf: fit.confidence,
+              edge: fit.edgeRatio, ratio: fit.dx/fit.dy,
+              truth: {x0:truth.x0, dx:truth.dx, y0:truth.y0, dy:truth.dy},
+              got: {x0:fit.x0, dx:fit.dx, y0:fit.y0, dy:fit.dy}, cv, W, H });
+
+  if (t % 6 === 5) await new Promise(r=>setTimeout(r,0));
+}
+
+const good = rows.filter(r => !r.fail && Math.max(r.farX, r.farY) < 0.08);
+const mid  = rows.filter(r => !r.fail && Math.max(r.farX, r.farY) >= 0.08 && Math.max(r.farX, r.farY) < 0.25);
+const badr = rows.filter(r => r.fail || Math.max(r.farX, r.farY) >= 0.25);
+
+log(`自动标定 ${N} 次：`);
+log(`  ${ok('好用')}（远端偏差 <0.08 格）: ${good.length}`);
+log(`  ${bad('勉强')}（0.08~0.25 格）    : ${mid.length}`);
+log(`  ${bad('不能用')}（≥0.25 格或失败） : ${badr.length}`);
+log('');
+if (rows.filter(r=>!r.fail).length) {
+  const avg = a => a.reduce((s,x)=>s+x,0)/a.length;
+  const all = rows.filter(r=>!r.fail);
+  log(`平均：左上偏差 ${avg(all.map(r=>r.ex)).toFixed(2)} / ${avg(all.map(r=>r.ey)).toFixed(2)} px`);
+  log(`      间距偏差 ${avg(all.map(r=>r.edx)).toFixed(3)} / ${avg(all.map(r=>r.edy)).toFixed(3)} px`);
+  log(`      dx/dy   ${avg(all.map(r=>r.ratio)).toFixed(3)}（应为 1.000）`);
+  log(`      置信度  ${avg(all.map(r=>r.conf)).toFixed(2)}`);
+}
+log('');
+log('前 8 次明细（远端累计偏差，单位格）：');
+for (const r of rows.slice(0, 8)) {
+  if (r.fail) { log(`  #${r.t} 拟合失败`); continue; }
+  const worst = Math.max(r.farX, r.farY);
+  log(`  #${r.t} X ${r.farX.toFixed(3)} Y ${r.farY.toFixed(3)} ${worst<0.08?ok('✓'):bad('✗')}` +
+      ` dx/dy ${r.ratio.toFixed(3)} conf ${r.conf.toFixed(1)} edge ${r.edge.toFixed(2)}`);
+}
+
+// 可视化：把偏差最大的两张画出来
+const worst2 = rows.filter(r=>!r.fail).sort((a,b)=>Math.max(b.farX,b.farY)-Math.max(a.farX,a.farY)).slice(0,2);
+for (const r of worst2) {
+  const vis=document.createElement('canvas'); vis.width=r.W; vis.height=r.H;
+  const vc=vis.getContext('2d'); vc.drawImage(r.cv,0,0);
+  vc.strokeStyle='#35c46a'; vc.lineWidth=3;
+  for(let i=0;i<COLS;i++){vc.beginPath();vc.moveTo(r.truth.x0+i*r.truth.dx,r.truth.y0);vc.lineTo(r.truth.x0+i*r.truth.dx,r.truth.y0+9*r.truth.dy);vc.stroke();}
+  for(let i=0;i<ROWS;i++){vc.beginPath();vc.moveTo(r.truth.x0,r.truth.y0+i*r.truth.dy);vc.lineTo(r.truth.x0+8*r.truth.dx,r.truth.y0+i*r.truth.dy);vc.stroke();}
+  vc.strokeStyle='#ff3b5c'; vc.lineWidth=2; vc.setLineDash([6,4]);
+  for(let i=0;i<COLS;i++){vc.beginPath();vc.moveTo(r.got.x0+i*r.got.dx,r.got.y0);vc.lineTo(r.got.x0+i*r.got.dx,r.got.y0+9*r.got.dy);vc.stroke();}
+  for(let i=0;i<ROWS;i++){vc.beginPath();vc.moveTo(r.got.x0,r.got.y0+i*r.got.dy);vc.lineTo(r.got.x0+8*r.got.dx,r.got.y0+i*r.got.dy);vc.stroke();}
+  const w=document.createElement('div');
+  w.innerHTML=`<div class="dim">#${r.t} 绿=真实 红虚线=自动标定 · 远端偏差 X ${r.farX.toFixed(3)} Y ${r.farY.toFixed(3)} 格</div>`;
+  w.appendChild(vis); document.getElementById('vis').appendChild(w);
+}
+window.__done = true;
+})().catch(e => { document.getElementById('out').textContent = '异常: ' + e.message; });
+</script>
+</body>
+</html>
