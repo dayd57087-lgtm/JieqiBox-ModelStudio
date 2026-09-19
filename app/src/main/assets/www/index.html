@@ -319,9 +319,11 @@
     <div class="card">
       <h2>体检 <span class="sp"></span>
         <span class="muted tiny" id="scanWhen"></span></h2>
-      <div class="muted">用象棋的硬规则检查全部标注：棋子数量、帅仕相的位置、将帅照面。
-        违反这些的局面在真实对局里根本不可能出现，所以一旦违反，几乎必然是标错了 ——
-        这是不需要人告诉答案就能发现错误的唯一可靠来源。</div>
+      <div class="muted">检查三件在揭棋里真的不可能出现的事：<b>各子数量超过定编</b>、
+        <b>将帅不在九宫</b>、<b>将帅照面</b>（将帅不参与开局打乱，所以位置是可信的）。
+        <br><br>
+        <span style="color:var(--faint)">注意：仕出九宫、相过河、兵在后方都<b>不是</b>错误 ——
+        揭棋除将帅外身份是打乱的，位置本身说明不了问题。</span></div>
       <div class="btnrow mt8">
         <button id="btnScan" class="primary">开始体检</button>
         <button id="btnAutoFixAll" class="sm">按规则自动修</button>

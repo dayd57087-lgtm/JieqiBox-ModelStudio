@@ -81,8 +81,18 @@
   /**
    * 单帧规则校验。
    *
-   * 只做「一帧之内就能判定」的检查 —— 不需要历史局面，所以在标注场景也适用。
-   * 需要前后两帧的走法合法性（马走日之类）不在这里做。
+   * 只做「揭棋里真的不可能出现」的检查。这里每一条都逐行对照过
+   * useChessGame.ts 的 isMoveMechanicallyValid，不能凭印象加。
+   *
+   * 特别要注意：**位置本身不构成违规**。揭棋开局除将帅外，
+   * 棋子的身份是打乱的（位置由 getRoleByPosition 决定，真实身份从
+   * hiddenPool 里随机分配）。所以仕可能在九宫外、相可能在河对岸、
+   * 兵也可能出现在后方 —— 这些都不是错。
+   *
+   * 真正站得住的只有三条：
+   *   1. 各子的**数量**不能超过定编（打乱的是位置，不是数量）
+   *   2. 将帅必须在自己的九宫里（将帅不参与打乱，且代码里有九宫限制）
+   *   3. 将帅不能照面（isInCheck 里的 flying king 规则）
    *
    * @returns {Array<{level, msg, cells:number[]}>}
    */
@@ -90,10 +100,12 @@
     var issues = [];
     var n = normalize(rawCells);
     var cells = n.cells;
+    var i;
 
     // ---- 1) 各子数量不得超过定编 ----
+    // 打乱只影响位置，不影响数量：每方各 16 子，组成固定。
     var count = {};
-    for (var i = 0; i < CELLS; i++) {
+    for (i = 0; i < CELLS; i++) {
       if (!cells[i]) continue;
       count[cells[i]] = (count[cells[i]] || 0) + 1;
     }
@@ -103,32 +115,23 @@
       if (c > LIMIT[v]) {
         issues.push({
           level: 'error', cells: [],
-          msg: (NAME[v] || v) + ' 有 ' + c + ' 个，象棋里最多 ' + LIMIT[v] + ' 个'
+          msg: (NAME[v] || v) + ' 有 ' + c + ' 个，揭棋里最多 ' + LIMIT[v] + ' 个'
         });
       }
     });
 
-    // ---- 2) 位置限制 ----
+    // ---- 2) 将帅必须在九宫内 ----
+    // 将帅不参与身份打乱（代码注释：revealed from move one and never leave
+    // their own palace），而且 king 分支里有明确的九宫限制。
     for (i = 0; i < CELLS; i++) {
       var val = cells[i];
-      if (!val) continue;
+      if (val !== R_GENERAL && val !== B_GENERAL) continue;
       var r = Math.floor(i / COLS), c = i % COLS;
-      var bad = null;
-
-      if (val === R_GENERAL && !inRedPalace(r, c)) bad = '红帅跑到九宫外了';
-      else if (val === B_GENERAL && !inBlackPalace(r, c)) bad = '黑将跑到九宫外了';
-      else if (val === R_ADVISOR && !inRedPalace(r, c)) bad = '红仕跑到九宫外了';
-      else if (val === B_ADVISOR && !inBlackPalace(r, c)) bad = '黑士跑到九宫外了';
-      else if (val === R_ELEPHANT && r < 5) bad = '红相过河了';
-      else if (val === B_ELEPHANT && r > 4) bad = '黑象过河了';
-      // 兵只能向前：红兵起始在第 7 行，走不到第 8、9 行
-      else if (val === R_SOLDIER && r > 6) bad = '红兵退到起始线之后了';
-      else if (val === B_SOLDIER && r < 3) bad = '黑卒退到起始线之前了';
-
-      if (bad) {
+      var okPalace = (val === R_GENERAL) ? inRedPalace(r, c) : inBlackPalace(r, c);
+      if (!okPalace) {
         issues.push({
           level: 'error', cells: [i],
-          msg: bad + '（' + posText(r, c) + '）'
+          msg: (val === R_GENERAL ? '红帅' : '黑将') + '不在九宫内（' + posText(r, c) + '）'
         });
       }
     }
@@ -153,10 +156,11 @@
       }
     }
 
-    // ---- 4) 暗子数量（揭棋上限：双方各 16 子）----
+    // ---- 4) 暗子数量 ----
+    // 开局 32 子里将帅是明的，所以暗子最多 30 个。
     var darkN = count[DARK] || 0;
-    if (darkN > 32) {
-      issues.push({ level: 'error', cells: [], msg: '暗子 ' + darkN + ' 个，超过棋盘总子数' });
+    if (darkN > 30) {
+      issues.push({ level: 'error', cells: [], msg: '暗子 ' + darkN + ' 个，最多 30 个' });
     }
 
     return issues;
