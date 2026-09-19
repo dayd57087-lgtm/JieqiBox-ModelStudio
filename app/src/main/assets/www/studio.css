@@ -36,6 +36,15 @@
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
+/*
+ * hidden 属性必须真的隐藏。
+ *
+ * 浏览器默认样式里的 [hidden]{display:none} 会被任何作者样式覆盖 ——
+ * 比如 `.btnrow{display:flex}` 就让带 hidden 的按钮行照样显示出来。
+ * 这个坑很隐蔽：属性设对了，但元素还在。
+ */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0; height: 100%;
   background: var(--bg); color: var(--text);
@@ -387,28 +396,61 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
   border-radius: var(--r); overflow: hidden; margin-bottom: 12px; touch-action: none;
 }
 #stage { display: block; width: 100%; height: auto; }
+/*
+ * 提示条改成画布外的一行，不再压在棋盘上。
+ * 压在棋盘底部时正好盖住边路的棋子 —— 而边路棋子恰恰是最需要看清的地方
+ * （标定偏一点，最先出问题的就是它们）。
+ */
 .stagehint {
-  position: absolute; left: 0; right: 0; bottom: 0; padding: 9px 12px;
-  font-size: 11px; background: linear-gradient(transparent, rgba(0, 0, 0, .88));
-  color: #dde3ea; pointer-events: none;
+  flex: 0 0 auto;
+  padding: 7px 12px 0;
+  font-size: 11px; line-height: 1.5;
+  color: var(--dim);
+  background: transparent;
+  pointer-events: none;
+  min-height: 18px;
 }
+.stagewrap { margin-bottom: 10px; }
 
 /* ─────────── 笔刷 ─────────── */
-.palette { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 4px; }
-.palette::-webkit-scrollbar { display: none; }
+/* 两行笔刷：标注一行、改错一行，语义不同 */
+.palette { display: flex; flex-direction: column; gap: 9px; }
+.brushrow {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px; border-radius: 12px;
+  border: 1px solid transparent; transition: .15s;
+}
+.brushrow__label {
+  flex: 0 0 auto; width: 30px; text-align: center;
+  font-size: 10px; line-height: 1.25; color: var(--faint); font-weight: 600;
+}
+/* 改错行用暖色主题，和标注行一眼分开 */
+.brushrow--fix { border-color: rgba(255, 176, 32, .28); background: rgba(255, 176, 32, .05); }
+.brushrow--fix .brushrow__label { color: var(--amber); }
+.palette.fix-mode .brushrow--fix { border-color: var(--amber); background: rgba(255, 176, 32, .1); }
+.palette.fix-mode > .brushrow--annotate { opacity: .45; }
+
+.brushgrid {
+  flex: 1; min-width: 0;
+  display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px;
+}
 .brush {
-  flex: 0 0 auto; width: 50px; height: 58px; border-radius: 12px;
+  width: 100%; height: 48px; border-radius: 10px;
   border: 1.5px solid var(--line); background: var(--panel2);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  padding: 0; gap: 2px; position: relative;
+  padding: 0; gap: 1px; position: relative;
 }
-.brush .g { font-size: 21px; font-weight: 700; line-height: 1; }
-.brush .cnt { font-size: 9px; line-height: 1; color: var(--ok); font-weight: 600; min-height: 9px; }
+.brush .g { font-size: 18px; font-weight: 700; line-height: 1; }
+.brush .cnt { font-size: 8.5px; line-height: 1; color: var(--ok); font-weight: 600; min-height: 8px; }
 .brush.r .g { color: var(--red); }
 .brush.b .g { color: var(--cyan); }
 .brush.d .g { color: var(--amber); }
 .brush.e .g { color: var(--faint); font-size: 16px; }
 .brush.on { background: var(--panel3); box-shadow: 0 0 0 2px var(--accent-soft); }
+.brushrow--fix .brush.on {
+  background: rgba(255, 176, 32, .18);
+  box-shadow: 0 0 0 2px rgba(255, 176, 32, .35);
+}
 .brush.r.on { border-color: var(--red); }
 .brush.b.on { border-color: var(--cyan); }
 .brush.d.on { border-color: var(--amber); }
@@ -450,3 +492,18 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 .chip b { color: var(--text); font-weight: 600; }
 .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
 .chip.on b { color: #fff; }
+
+/* ─── 标注页：底部固定的笔刷条 ─── */
+.brushbar {
+  flex: 0 0 auto;
+  background: var(--panel);
+  border-top: 1px solid var(--line2);
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, .28);
+}
+.brushbar .palette { gap: 7px; }
+/* 底部条里的按钮更紧凑 */
+.brushbar .btnrow { gap: 6px; }
+.brushbar .btnrow > button { padding: 7px 9px; font-size: 12px; }
+.brushbar .btnrow { flex-wrap: nowrap; }
+.brushbar .btnrow > button:not(.sm):not(.ghost) { flex: 1 1 0; min-width: 0; }

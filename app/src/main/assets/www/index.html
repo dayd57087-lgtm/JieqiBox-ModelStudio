@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=30">
+<link rel="stylesheet" href="studio.css?v=70">
 </head>
 <body>
 
@@ -176,48 +176,55 @@
     <div class="legendbar" id="legend"></div>
     <div class="stagewrap">
       <canvas id="stage"></canvas>
-      <div id="stageHint" class="stagehint"></div>
     </div>
-    <div class="card tight">
-      <div class="btnrow">
-        <button id="btnCalib" class="primary">框选棋盘</button>
-        <button id="btnAuto">自动校正</button>
-        <button id="btnNudge">微调</button>
-      </div>
-      <div class="btnrow mt8 slim">
-        <span class="muted tiny">缩放</span>
-        <button id="btnZoomOut" class="sm">－</button>
-        <span id="zoomLabel" class="tiny muted" style="min-width:34px;text-align:center">1.0×</span>
-        <button id="btnZoomIn" class="sm">＋</button>
-        <button id="btnZoomFit" class="sm ghost">适应</button>
-      </div>
-      <!-- 核对模式下才出现：明确区分「核对」和「改标注」两个动作 -->
-      <div class="btnrow mt8" id="compareBar" hidden>
-        <button id="btnExitCompare" class="sm primary">改标注</button>
-        <span class="muted tiny">核对中：点紫色格子 = 让模型重点学这处</span>
-      </div>
-      <div class="btnrow mt8">
-        <button id="btnPreLabel" class="sm">模型预标注</button>
-        <button id="btnCopyPrev" class="sm">复制上局</button>
-        <button id="btnCheckModel" class="sm">对比模型</button>
-        <button id="btnClearCells" class="sm danger-ghost">清空</button>
-      </div>
-      <div class="btnrow mt8">
-        <button id="btnPinMode" class="sm">取空位</button>
-        <button id="btnPinClear" class="sm ghost">清除空位</button>
-        <span class="muted tiny" style="margin-left:auto">模板生成用</span>
-      </div>
+    <div id="stageHint" class="stagehint"></div>
+  </div>
+
+  <!--
+    笔刷固定在底部，不跟着内容滚。
+    标注时最需要它的那几秒，它偏偏滚出屏幕了 —— 得往下滑才能选子，很别扭。
+  -->
+  <div class="brushbar">
+    <!-- 核对模式下才出现：明确区分「核对」和「改标注」两个动作 -->
+    <div class="btnrow mb6" id="compareBar" hidden>
+      <button id="btnAcceptAll" class="sm primary">全部确认</button>
+      <button id="btnExitCompare" class="sm">改标注</button>
+      <span class="muted tiny">点紫色格子可点掉</span>
     </div>
-    <div class="card tight">
-      <div class="row between mb6">
-        <span class="muted tiny">当前笔刷</span>
-        <span id="cellProgress" class="tiny">已标注 0 / 90</span>
-      </div>
-      <div id="palette" class="palette"></div>
-      <div class="muted tiny mt8">
-        点格子落子 · 同笔刷再点擦除 · 双指捏合缩放 · 放大后单指拖动平移
-      </div>
+
+    <!-- 操作按钮不滚动：标注时要能随时点，滚出屏幕就得先滑回去 -->
+    <!-- 标定相关 -->
+    <div class="btnrow mb6">
+      <button id="btnCalib" class="primary">框选棋盘</button>
+      <button id="btnAuto" class="sm">校正</button>
+      <button id="btnNudge" class="sm">微调</button>
+      <button id="btnZoomOut" class="sm">－</button>
+      <span id="zoomLabel" class="tiny muted" style="min-width:30px;text-align:center">1.0×</span>
+      <button id="btnZoomIn" class="sm">＋</button>
+      <button id="btnZoomFit" class="sm ghost">适应</button>
     </div>
+    <!-- 标注与纠错相关 -->
+    <div class="btnrow mb6">
+      <button id="btnPreLabel" class="sm">预标注</button>
+      <button id="btnCopyPrev" class="sm">复制上局</button>
+      <button id="btnCheckModel" class="sm">对比模型</button>
+      <button id="btnPinMode" class="sm ghost">取空位</button>
+      <button id="btnPinClear" class="sm ghost">清空位</button>
+      <button id="btnClearCells" class="sm danger-ghost">清空</button>
+    </div>
+
+    <div class="row between mb6">
+      <span class="muted tiny">笔刷</span>
+      <span id="cellProgress" class="tiny">已标注 0 / 90</span>
+    </div>
+    <!--
+      两行笔刷，语义不同：
+        标注 —— 点格子 = 记下这一格是什么子
+        改错 —— 点格子 = 把这一格改成对的，并自动列入「待模型重点学」
+      分开之后，「我在标注」和「我在改错」是两个明确的动作，不会互相串。
+    -->
+    <div id="palette" class="palette"></div>
+    <div class="muted tiny mt6" id="brushHint"></div>
   </div>
 
   <div class="empty" id="annotateEmpty" hidden>
@@ -324,8 +331,8 @@
 </div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=30"></script>
-<script src="onnx-export.js?v=30"></script>
-<script src="studio.js?v=30"></script>
+<script src="lattice.js?v=70"></script>
+<script src="onnx-export.js?v=70"></script>
+<script src="studio.js?v=70"></script>
 </body>
 </html>

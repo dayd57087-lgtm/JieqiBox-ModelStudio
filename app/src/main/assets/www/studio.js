@@ -77,6 +77,34 @@
 
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
+  /**
+   * 确保有一个可用的模型。
+   *
+   * 模型就存在库里，没必要让用户先手动载入 ——
+   * 凡是需要推理的地方（预标注、对比模型、回测）都先调它，
+   * 行为一致，用户不用记「哪个功能需要先载入模型」。
+   * @returns true 表示 model 已就绪
+   */
+  async function ensureModel() {
+    if (model) return true;
+    if (!savedModels.length) {
+      toast('还没有模型 —— 先到「训练」页跑一次', 3400);
+      return false;
+    }
+    setBusy(true, '载入模型', savedModels[0].name);
+    try {
+      await loadModelFromRecord(savedModels[0]);
+      setBusy(false);
+      refreshFinetunePanel();
+      log('已自动载入模型「' + savedModels[0].name + '」');
+      return true;
+    } catch (e) {
+      setBusy(false);
+      toast('载入模型失败：' + e.message, 3600);
+      return false;
+    }
+  }
+
   /** 让出主线程，让界面能重绘。
    *  不能直接用 tf.nextFrame()：它等的是 requestAnimationFrame，而页面不可见时
    *  rAF 根本不触发，训练会永久卡在第一个让步点上。这里让 rAF 和定时器赛跑。 */
@@ -174,7 +202,16 @@
   var samples = [];         // 内存中的样本列表（含 blob）
   var current = -1;         // 当前标注的样本下标
   var mode = 'paint';       // paint | draw | nudge
-  var brush = 0;            // 当前笔刷的类别索引
+  var brush = 0;            // 标注笔刷的类别索引
+  /*
+   * 改错笔刷。有值时表示用户正在用「改错」这一行：
+   * 点格子会把该格改成这个子，并列入待学清单。
+   *
+   * 和标注分开的理由：用户真正的痛点是「改一个棋子太麻烦、还容易和标注搞混」。
+   * 给它一个独立的笔刷行，改错就变成一个明确的动作 ——
+   * 选错行了他自己看得见。
+   */
+  var fixBrush = null;
   var drawStart = null, drawNow = null, nudgeRef = null;
   // 「取空位」模式：让用户直接指定哪几处是干净木板，作为生成模板的贴图来源
   var pinMode = false;
@@ -533,10 +570,21 @@
       '<div class="info"><div class="t"><b>已选 ' + n + ' 张</b>' +
       '<span class="tiny">可以对它们批量操作</span></div></div>' +
       '<div class="acts c3">' +
-      '<button class="ab pri" data-b="calib"><span class="ic">▦</span>自动标定</button>' +
+      '<button class="ab pri" data-b="accept"><span class="ic">✓</span>确认预标注</button>' +
+      '<button class="ab" data-b="calib"><span class="ic">▦</span>自动标定</button>' +
       '<button class="ab" data-b="prelabel"><span class="ic">◑</span>模型预标注</button>' +
+      '</div>' +
+      '<div class="acts c3 mt8">' +
       '<button class="ab" data-b="del"><span class="ic">✕</span>删除</button>' +
       '</div>';
+    $('sheet').querySelector('[data-b="accept"]').addEventListener('click', function () {
+      var sel = samples.filter(function (s) { return picked[s.key]; });
+      closeSheet();
+      picked = {};
+      renderStats();
+      renderSamples();
+      acceptMany(sel);
+    });
     $('sheet').querySelector('[data-b="calib"]').addEventListener('click', function () {
       var keys = Object.keys(picked); closeSheet();
       batchCalibrate(samples.filter(function (s) { return picked[s.key]; }));
@@ -2089,6 +2137,29 @@
       return idx;
     }
     /*
+     * 改错行：把这一格改成对的，并记入「待模型重点学」。
+     *
+     * 这一行是给「模型认错了，我直接改过来」用的。改完这一格同时做两件事：
+     *   · 更新标注（反正这一格确实该是这个子）
+     *   · 列入待学（下次微调时模型会重点看这里）
+     * 所以它天然属于纠错闭环，不需要用户再切模式。
+     */
+    if (fixBrush !== null) {
+      s.cells = s.cells || new Array(CELLS).fill(0);
+      s.fixed = s.fixed || new Array(CELLS).fill(0);
+      s.skip = s.skip || new Array(CELLS).fill(0);
+      s.cells[idx] = fixBrush;
+      s.fixed[idx] = 1;
+      s.skip[idx] = 0;
+      if (s.auto) s.auto[idx] = 0;   // 人工改过，不再是「模型猜的」
+      lastCell = idx;
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      return idx;
+    }
+
+    /*
      * 核对模式（正在看模型预测）：点格子只是切换「这处要不要让模型重点学」，
      * **绝不改标注**。
      *
@@ -2379,19 +2450,74 @@
   function renderPalette() {
     var p = $('palette');
     p.innerHTML = '';
-    CLASSES.forEach(function (c, i) {
-      var b = document.createElement('button');
-      b.className = 'brush ' + c.k + (i === brush ? ' on' : '');
-      b.innerHTML = '<span class="g">' + c.g + '</span><span class="cnt"></span>';
-      b.addEventListener('click', function () {
-        brush = i;
-        Array.prototype.forEach.call(p.children, function (x, j) {
-          x.classList.toggle('on', j === i);
-        });
+
+    var ROWS = [
+      { key: 'annotate', label: '标注', hint: '点格子 = 记下这一格是什么子' },
+      { key: 'fix', label: '改错', hint: '点格子 = 改成对的，并让模型重点学这里' }
+    ];
+
+    ROWS.forEach(function (row) {
+      var wrap = document.createElement('div');
+      wrap.className = 'brushrow brushrow--' + row.key;
+
+      var lab = document.createElement('span');
+      lab.className = 'brushrow__label';
+      lab.textContent = row.label;
+      wrap.appendChild(lab);
+
+      var grid = document.createElement('div');
+      grid.className = 'brushgrid';
+      CLASSES.forEach(function (c, i) {
+        var b = document.createElement('button');
+        var on = (row.key === 'fix') ? (fixBrush === i) : (fixBrush === null && brush === i);
+        b.className = 'brush ' + c.k + (on ? ' on' : '');
+        b.dataset.idx = i;
+        b.dataset.row = row.key;
+        b.innerHTML = '<span class="g">' + c.g + '</span><span class="cnt"></span>';
+        grid.appendChild(b);
       });
-      p.appendChild(b);
+      wrap.appendChild(grid);
+      p.appendChild(wrap);
     });
+
+    p.addEventListener('click', function (ev) {
+      var b = ev.target.closest ? ev.target.closest('.brush') : null;
+      if (!b) return;
+      var i = Number(b.dataset.idx);
+      if (b.dataset.row === 'fix') {
+        // 点同一格两次 = 退出改错行，回到标注
+        fixBrush = (fixBrush === i) ? null : i;
+      } else {
+        brush = i;
+        fixBrush = null;      // 切回标注行
+      }
+      syncBrushUI();
+    });
+
     renderPaletteCounts();
+    syncBrushUI();
+  }
+
+  /** 把选中态与提示文字同步到界面 */
+  function syncBrushUI() {
+    var p = $('palette');
+    if (!p) return;
+    Array.prototype.forEach.call(p.querySelectorAll('.brush'), function (x) {
+      var i = Number(x.dataset.idx);
+      var on = (x.dataset.row === 'fix') ? (fixBrush === i) : (fixBrush === null && brush === i);
+      x.classList.toggle('on', on);
+    });
+    p.classList.toggle('fix-mode', fixBrush !== null);
+
+    var hint = $('brushHint');
+    if (!hint) return;
+    if (fixBrush !== null) {
+      hint.innerHTML = '<b style="color:#ffb020">改错模式</b>：点格子会把那一格改成' +
+        '「' + CLASSES[fixBrush].g + '」，并自动列入待学清单。' +
+        '再点一次这个笔刷可退出。';
+    } else {
+      hint.textContent = '点格子落子 · 同笔刷再点擦除 · 双指捏合缩放 · 放大后单指拖动平移';
+    }
   }
 
   $('btnCalib').addEventListener('click', function () {
@@ -2483,20 +2609,7 @@
       return;
     }
 
-    // 没载入模型就自动取最新的 —— 和回测一样，模型就在库里，没必要让用户先手动载入
-    if (!model) {
-      if (!savedModels.length) { toast('还没有模型 —— 先到「训练」页跑一次', 3200); return; }
-      setBusy(true, '载入模型', savedModels[0].name);
-      try {
-        await loadModelFromRecord(savedModels[0]);
-        setBusy(false);
-        refreshFinetunePanel();
-      } catch (e) {
-        setBusy(false);
-        toast('载入模型失败：' + e.message, 3600);
-        return;
-      }
-    }
+    if (!(await ensureModel())) return;
 
     if (backtest[s.key]) {
       lastPred = backtest[s.key].pred;
@@ -2526,6 +2639,62 @@
     log('核对「' + s.name + '」：' + n + ' 处与标注不一致，已列入待学清单');
     toast('发现 ' + n + ' 处判错。点紫色格子可以点掉（表示这处不用学）', 3200);
   });
+
+  /**
+   * 一键确认：这张图的预标注全对，不用再核对。
+   *
+   * 用户做模型辅助标注的初衷就是减轻负担 —— 模型猜对的那一大堆图，
+   * 逐格点一遍纯属浪费。确认一下就把「待核对」这个状态清掉。
+   *
+   * 注意只清 auto（模型猜的标记）与待学清单，**不动标注本身**。
+   */
+  function acceptSample(s) {
+    if (!s) return 0;
+    var n = 0;
+    if (s.auto) {
+      for (var i = 0; i < CELLS; i++) if (s.auto[i]) { s.auto[i] = 0; n++; }
+    }
+    // 确认全对，就没有「待学」可言了
+    if (s.fixed) for (var j = 0; j < CELLS; j++) s.fixed[j] = 0;
+    if (s.skip) for (var k = 0; k < CELLS; k++) s.skip[k] = 0;
+    return n;
+  }
+
+  $('btnAcceptAll').addEventListener('click', async function () {
+    var s = currentSample();
+    if (!s) return;
+    var n = acceptSample(s);
+    showPred = false;
+    lastPred = null;
+    updateCompareBar();
+    await dbPut(toRecord(s));
+    renderStage();
+    renderSamples();
+    renderHome();
+    log('已确认「' + s.name + '」：清掉 ' + n + ' 处模型预标注标记');
+    toast(n ? ('已确认，' + n + ' 处预标注转为人工确认') : '已确认', 2200);
+  });
+
+  /** 批量确认：一次把多张图的预标注都确认掉 */
+  async function acceptMany(list) {
+    var arr = (list || []).filter(function (s) { return s.auto && s.auto.some(function (v) { return v; }); });
+    if (!arr.length) { toast('这些图没有待确认的预标注'); return; }
+
+    setBusy(true, '确认预标注', '0 / ' + arr.length);
+    var total = 0;
+    for (var i = 0; i < arr.length; i++) {
+      total += acceptSample(arr[i]);
+      await dbPut(toRecord(arr[i]));
+      $('busySub').textContent = (i + 1) + ' / ' + arr.length;
+      if (i % 5 === 4) await yieldTick();
+    }
+    setBusy(false);
+    renderStats();
+    renderSamples();
+    renderHome();
+    log('批量确认 ' + arr.length + ' 张，共清掉 ' + total + ' 处预标注标记');
+    toast('已确认 ' + arr.length + ' 张', 2600);
+  }
 
   /** 核对模式下才显示那条「改标注」提示栏 */
   function updateCompareBar() {
@@ -3067,7 +3236,7 @@
   $('btnPreLabel').addEventListener('click', async function () {
     var s = currentSample();
     if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
-    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+    if (!(await ensureModel())) return;
 
     var btn = $('btnPreLabel');
     btn.disabled = true; btn.textContent = '推理中…';
@@ -3087,7 +3256,7 @@
 
   /** 批量预标注：只处理已标定、且还没怎么人工标注过的图 */
   async function preLabelAll() {
-    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
+    if (!(await ensureModel())) return;
     var targets = samples.filter(function (s) { return s.lattice; });
     if (!targets.length) { toast('还没有已标定的图，先点「批量标定」'); return; }
 
