@@ -195,7 +195,7 @@
       b.classList.toggle('on', b.dataset.tab === name);
     });
     if (name === 'annotate') renderStage();
-    if (name === 'train') refreshTrainTab();
+    if (name === 'train') { refreshTrainTab(); refreshFinetunePanel(); }
     if (name === 'models') refreshSavedModels();
   }
   Array.prototype.forEach.call(document.querySelectorAll('.tabs button'), function (b) {
@@ -1088,6 +1088,7 @@
       if (showPred && lastPred) drawPredMarks(s, lastPred, S);
       else drawMarkers(s, S);
       drawPins(s, S);
+      drawFixed(s, S);
     }
     if (mode === 'draw' && drawStart && drawNow) drawRough(drawStart, drawNow, S);
     sctx.restore();
@@ -1102,7 +1103,7 @@
       hint.textContent = dd.diff.length === 0
         ? '模型预测与标注完全一致 ✓'
         : ('模型预测有 ' + dd.diff.length + ' 格不符（其中非空 ' + dd.wrongNonEmpty +
-           ' 格）· 红=模型判错，绿=判对');
+           ' 格）· 紫圈=模型判错，改对它即可（改动会被记为修正样本）');
     } else {
       hint.textContent = mode === 'draw'
         ? '在棋盘外沿拖一个框，大致圈住九路十行即可，会自动精修'
@@ -1215,6 +1216,33 @@
     }
   }
 
+  /**
+   * 标出人工修正过的格子。
+   * 用中空小方块而不是填充色 —— 阵营色已经占了三种颜色，
+   * 再加一种填充色只会更乱；中空形状和它们不冲突。
+   */
+  function drawFixed(s, S) {
+    if (!s.lattice || !s.fixed) return;
+    var IW = view.imgW, IH = view.imgH;
+    var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
+    var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
+    var R = Math.min(dx, dy) * 0.34;
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var i = r * COLS + c;
+        if (!s.fixed[i]) continue;
+        var cx = x0 + c * dx, cy = y0 + r * dy;
+        sctx.save();
+        sctx.translate(cx, cy);
+        sctx.rotate(Math.PI / 4);
+        sctx.strokeStyle = '#7b5cff';
+        sctx.lineWidth = 2.4 / S;
+        sctx.strokeRect(-R * 0.78, -R * 0.78, R * 1.56, R * 1.56);
+        sctx.restore();
+      }
+    }
+  }
+
   /** 「取空位」模式下手工指定的干净木板，画成白色菱形 */
   function drawPins(s, S) {
     if (!s.lattice || !s.pins || !s.pins.length) return;
@@ -1243,6 +1271,46 @@
     if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
     var n = parseInt(h, 16);
     return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  /**
+   * 对比模式：叠加显示模型的预测，并标出判错的格子。
+   *
+   * 配色刻意避开阵营色（红/青/琥珀），改用绿与紫 ——
+   * 否则「模型判错的紫圈」会和「红方的洋红圈」糊在一起，
+   * 而对比模式恰恰是最需要一眼分清"标记"与"棋子"的时候。
+   *
+   *   绿 = 模型与标注一致
+   *   紫 = 模型判错（圈里写的是模型认为的子）
+   */
+  function drawPredMarks(s, pred, S) {
+    var IW = view.imgW, IH = view.imgH;
+    var x0 = s.lattice.x0 * IW, y0 = s.lattice.y0 * IH;
+    var dx = s.lattice.dx * IW, dy = s.lattice.dy * IH;
+    var R = Math.min(dx, dy) * 0.33;
+
+    for (var r = 0; r < ROWS; r++) {
+      for (var c = 0; c < COLS; c++) {
+        var i = r * COLS + c;
+        var truth = s.cells ? s.cells[i] : 0;
+        var p = pred[i];
+        var wrong = p !== truth;
+        if (p === 0 && !wrong) continue;      // 两边都是空，没什么可看的
+
+        var cx = x0 + c * dx, cy = y0 + r * dy;
+        sctx.beginPath();
+        sctx.arc(cx, cy, R, 0, Math.PI * 2);
+        sctx.fillStyle = 'rgba(8,10,14,' + (wrong ? 0.62 : 0.42) + ')';
+        sctx.fill();
+        sctx.lineWidth = (wrong ? 3 : 1.6) / S;
+        sctx.strokeStyle = wrong ? '#7b5cff' : '#3fbf74';
+        sctx.stroke();
+        sctx.fillStyle = wrong ? '#b9a6ff' : '#6cdc93';
+        sctx.font = 'bold ' + Math.round(R * 1.12) + 'px "PingFang SC",serif';
+        sctx.textAlign = 'center'; sctx.textBaseline = 'middle';
+        sctx.fillText(p === 0 ? '空' : CLASSES[p].g, cx, cy);
+      }
+    }
   }
 
   /** 阵营图例（放在画布下方，不遮棋盘） */
@@ -1467,10 +1535,36 @@
     s.cells[idx] = (s.cells[idx] === brush) ? 0 : brush;   // 同笔刷再点 = 擦掉
     // 人手点过这一格，就不再是「模型猜的」，虚线环随之变成实线
     if (s.auto) s.auto[idx] = 0;
+    markFixed(s, idx);
     lastCell = idx;
     queueSave(s);
     renderStage();
     return idx;
+  }
+
+  /**
+   * 记录「这一格我改过，而且和模型的判断不一样」。
+   *
+   * 这是纠错闭环的信号来源。只在**正在对比模型预测**时记录 ——
+   * 那个界面的语义就是"我在核对模型错在哪"，此时改动基本都是在改错。
+   * 普通标注（没有预测可对比）不算修正，只算人工标注。
+   */
+  function markFixed(s, idx) {
+    var pred = lastPred;
+    if (!pred || !showPred) {
+      if (s.fixed && s.fixed[idx]) s.fixed[idx] = 0;
+      return;
+    }
+    s.fixed = s.fixed || new Array(CELLS).fill(0);
+    s.fixed[idx] = (s.cells[idx] === pred[idx]) ? 0 : 1;
+  }
+
+  /** 一张图上有多少格是人工修正过的 */
+  function fixedCount(s) {
+    if (!s || !s.fixed) return 0;
+    var n = 0;
+    for (var i = 0; i < CELLS; i++) if (s.fixed[i]) n++;
+    return n;
   }
 
   function bindStage() {
@@ -1638,7 +1732,7 @@
     return {
       key: s.key, name: s.name, w: s.w, h: s.h, thumb: s.thumb, blob: s.blob,
       lattice: s.lattice, cells: s.cells, conf: s.conf,
-      auto: s.auto, src: s.src, pins: s.pins
+      auto: s.auto, src: s.src, pins: s.pins, fixed: s.fixed
     };
   }
 
@@ -1868,6 +1962,8 @@
   // 训练时每个 batch 只需要几段 memcpy。
   var trainX = null, trainY = null;
   var valX = null, valY = null, valLabelsArr = null;
+  // 每个训练样本是不是「人工修正过」的。纠错微调靠它加权。
+  var trainFixed = null;
   var valKeys = {};      // 上一轮训练用到的验证图，回测时用来分开统计
 
   function usable() {
@@ -1918,6 +2014,7 @@
 
     var trSlices = [], vaSlices = [];
     var trLab = [], vaLab = [];
+    var trFix = [], vaFix = [];
     var px = inSize * inSize * 3;
 
     for (var n = 0; n < u.length; n++) {
@@ -1930,8 +2027,9 @@
         if (lab === 0 && Math.random() > keepEmpty) continue;
         var src = new Uint8Array(px);
         src.set(slice.subarray(c * px, c * px + px));
-        if (isVal) { vaSlices.push(src); vaLab.push(lab); }
-        else { trSlices.push(src); trLab.push(lab); }
+        var isFix = s.fixed && s.fixed[c] ? 1 : 0;
+        if (isVal) { vaSlices.push(src); vaLab.push(lab); vaFix.push(isFix); }
+        else { trSlices.push(src); trLab.push(lab); trFix.push(isFix); }
       }
       if (n % 5 === 4) await new Promise(function (r) { setTimeout(r, 0); });
     }
@@ -1956,16 +2054,24 @@
       valY[q2 * NC + vaLab[q2]] = 1;
     }
     valLabelsArr = new Int32Array(vaLab);
+    trainFixed = new Uint8Array(trFix);
+
+    var nFix = 0;
+    for (var fi = 0; fi < trainFixed.length; fi++) if (trainFixed[fi]) nFix++;
 
     var mb = (trainX.byteLength + valX.byteLength) / 1048576;
-    log('训练切片 ' + nTrain + ' · 验证切片 ' + nVal + ' · 共 ' + fmt(mb, 1) + ' MB');
+    log('训练切片 ' + nTrain + ' · 验证切片 ' + nVal + ' · 共 ' + fmt(mb, 1) + ' MB' +
+        (nFix ? ' · 其中人工修正 ' + nFix + ' 格' : ''));
     $('dataSummary').innerHTML += '<br>训练切片 <b>' + nTrain + '</b> · 验证切片 <b>' +
-      nVal + '</b> · ' + fmt(mb, 1) + ' MB';
+      nVal + '</b> · ' + fmt(mb, 1) + ' MB' +
+      (nFix ? '<br><span style="color:#7b5cff">人工修正 <b>' + nFix +
+        '</b> 格 —— 可用「纠错微调」让模型从这里学</span>' : '');
 
     $('btnBuild').disabled = false;
     $('btnBuild').textContent = '构建数据集';
     $('btnTrain').disabled = false;
     $('btnPreviewCells').disabled = false;
+    refreshFinetunePanel();
     return true;
   }
 
@@ -2066,19 +2172,22 @@
    * 每行一次 TypedArray.set（memcpy），不再有逐元素的 JS 循环。
    * 这是训练提速的主要来源。
    */
-  function makeBatch(order, from, to, size) {
+  function makeBatch(order, from, to, size, weights) {
     var px = size * size * 3;
     var count = to - from;
     var xsArr = new Float32Array(count * px);
     var ysArr = new Float32Array(count * NC);
+    var wArr = weights ? new Float32Array(count) : null;
     for (var i = 0; i < count; i++) {
       var src = order[from + i];
       xsArr.set(trainX.subarray(src * px, src * px + px), i * px);
       ysArr.set(trainY.subarray(src * NC, src * NC + NC), i * NC);
+      if (wArr) wArr[i] = weights[src];
     }
     return {
       xs: tf.tensor4d(xsArr, [count, size, size, 3]),
-      ys: tf.tensor2d(ysArr, [count, NC])
+      ys: tf.tensor2d(ysArr, [count, NC]),
+      w: wArr ? tf.tensor1d(wArr) : null
     };
   }
 
@@ -2331,6 +2440,7 @@
     return dbAll().then(function (all) {
       savedModels = (all || []).filter(isModelRecord).sort(function (a, b) { return b.at - a.at; });
       renderSavedModels();
+      refreshFinetunePanel();
     });
   }
 
@@ -2790,6 +2900,276 @@
     $('trainProg').style.width = '100%';
   });
 
+  // ---------------------------------------------------------------- 纠错微调
+  //
+  // 解决的是这样一个循环：回测发现模型错了几格 → 改对 → 但重新从头训练后
+  // 那几格的改动被 2691 个训练样本稀释掉，等于没改。
+  //
+  // 这里做三件事：
+  //   1. 以现有模型为起点（不从头学），学习率调低
+  //   2. 人工修正过的格子加权，让梯度里看得见
+  //   3. 从旧数据里回放一批，防止「改对了 A、B 全忘了」
+
+  /** 只把权重读出来，不动全局 model */
+  async function loadModelWeights(rec) {
+    var m = await tf.loadLayersModel(tf.io.fromMemory({
+      modelTopology: rec.modelTopology,
+      weightSpecs: rec.weightSpecs,
+      weightData: rec.weightData
+    }));
+    return m;
+  }
+
+  function refreshFinetunePanel() {
+    var sel = $('ftBase');
+    if (!sel) return;
+    var prev = sel.value;
+    sel.innerHTML = savedModels.map(function (m, i) {
+      var d = m.meta || {};
+      return '<option value="' + i + '">' + escapeHtml(m.name) +
+        (d.desc ? '（' + escapeHtml(d.desc) + '）' : '') + '</option>';
+    }).join('');
+    if (prev && sel.querySelector('option[value="' + prev + '"]')) sel.value = prev;
+
+    // 统计有多少修正样本可用
+    var u = usable();
+    var nFix = 0, imgsWithFix = 0;
+    u.forEach(function (s) {
+      var c = fixedCount(s);
+      if (c) { nFix += c; imgsWithFix++; }
+    });
+
+    var el = $('ftSummary');
+    if (!savedModels.length) {
+      el.innerHTML = '还没有可用的起点模型 —— 先在下面「开始训练」跑一次。';
+      $('btnFinetune').disabled = true;
+    } else if (!nFix) {
+      el.innerHTML = '还没有人工修正的格子。<br>' +
+        '到「训练 → 逐图回测」跑一遍，再回到「标注」页点「对比模型」，' +
+        '把模型判错的格子改对 —— 那些改动会被记下来，这里就能用。';
+      $('btnFinetune').disabled = true;
+    } else {
+      el.innerHTML = '待学习的修正：<b style="color:#7b5cff">' + nFix +
+        '</b> 格，分布在 <b>' + imgsWithFix + '</b> 张图上。<br>' +
+        '<span class="muted">这些格子会在训练中被加权，其余数据按「回放比例」混入，' +
+        '避免把已经学会的东西忘掉。</span>';
+      $('btnFinetune').disabled = false;
+    }
+  }
+
+  $('btnFinetune').addEventListener('click', async function () {
+    if (!trainX || !trainFixed) { toast('先在下面「构建数据集」'); return; }
+    var fixIdx = [];
+    for (var i = 0; i < trainFixed.length; i++) if (trainFixed[i]) fixIdx.push(i);
+    if (!fixIdx.length) { toast('还没有人工修正的格子'); return; }
+
+    var rec = savedModels[parseInt($('ftBase').value, 10)];
+    if (!rec) { toast('请选择起点模型'); return; }
+
+    // 起点模型的输入尺寸必须和当前一致，否则权重对不上
+    if (rec.size !== inSize) {
+      toast('起点模型的输入是 ' + rec.size + '×' + rec.size +
+            '，当前数据集是 ' + inSize + '×' + inSize +
+            '。请把「输入尺寸」改回 ' + rec.size + ' 再构建数据集。', 5200);
+      return;
+    }
+
+    var fixW = clamp(parseInt($('ftWeight').value, 10) || 6, 1, 50);
+    var replayPct = clamp(parseInt($('ftReplay').value, 10) || 0, 0, 100);
+    var epochs = clamp(parseInt($('ftEpochs').value, 10) || 12, 1, 100);
+    var lr = clamp(parseInt($('ftLr').value, 10) || 1, 1, 100) * 1e-4;
+    var headOnly = $('ftHeadOnly').checked;
+
+    $('btnFinetune').disabled = true;
+    $('ftCompare').innerHTML = '';
+    if (native()) native().keepAwake(true);
+
+    try {
+      // ---- 1) 组装训练子集：修正样本 + 回放 ----
+      var order = fixIdx.slice();
+      var rest = [];
+      for (var r2 = 0; r2 < trainFixed.length; r2++) {
+        if (!trainFixed[r2]) rest.push(r2);
+      }
+      // 打乱后按比例抽回放样本
+      for (var q = rest.length - 1; q > 0; q--) {
+        var j = Math.floor(Math.random() * (q + 1));
+        var t = rest[q]; rest[q] = rest[j]; rest[j] = t;
+      }
+      var nReplay = Math.round(rest.length * replayPct / 100);
+      var replay = rest.slice(0, nReplay);
+
+      var weights = new Float32Array(trainFixed.length);
+      order.forEach(function (ix) { weights[ix] = fixW; });
+      replay.forEach(function (ix) { weights[ix] = 1; });
+
+      var trainOrder = order.concat(replay);
+      // 整体打乱，避免「先全是修正、后全是回放」影响每轮的批内分布
+      for (var z = trainOrder.length - 1; z > 0; z--) {
+        var k = Math.floor(Math.random() * (z + 1));
+        var tmp = trainOrder[z]; trainOrder[z] = trainOrder[k]; trainOrder[k] = tmp;
+      }
+
+      log('纠错微调：修正 ' + order.length + ' 格（权重 ×' + fixW + '） + 回放 ' +
+          replay.length + ' 格 · ' + epochs + ' 轮 · lr ' + lr.toExponential(0) +
+          (headOnly ? ' · 只训最后一层' : ''));
+
+      // ---- 2) 以现有模型为起点 ----
+      var base = await loadModelWeights(rec);
+      var fresh = buildModel(inSize);
+      var bw = base.getWeights();
+      var fw = fresh.getWeights();
+      if (bw.length !== fw.length) {
+        base.dispose(); fresh.dispose();
+        toast('起点模型的层结构与当前不匹配，无法继续训。请重新训练一个。', 4600);
+        return;
+      }
+      for (var g = 0; g < bw.length; g++) {
+        var shapeA = bw[g].shape.join(',');
+        var shapeB = fw[g].shape.join(',');
+        if (shapeA !== shapeB) {
+          base.dispose(); fresh.dispose();
+          toast('起点模型的权重形状不一致（' + shapeA + ' vs ' + shapeB + '）', 4600);
+          return;
+        }
+      }
+      fresh.setWeights(bw);
+      base.dispose();
+      log('已载入起点模型「' + rec.name + '」的权重');
+
+      // ---- 3) 只训最后一层：冻结前面全部 ----
+      if (headOnly) {
+        fresh.layers.forEach(function (l, i) {
+          l.trainable = (i === fresh.layers.length - 1);
+        });
+      }
+
+      var opt = tf.train.adam(lr);
+      // 显式收集可训练变量。
+      // 光设 layer.trainable 不够保险 —— optimizer 默认走 tf.trainableVariables()，
+      // 而这套全局收集在动态改 trainable 后不一定立刻反映。直接给列表最稳。
+      var trainVars = [];
+      fresh.layers.forEach(function (l) {
+        if (l.trainable === false) return;
+        l.trainableWeights.forEach(function (w) { trainVars.push(w.val); });
+      });
+      fresh.compile({ optimizer: opt, loss: 'meanSquaredError' });
+      log('本次参与更新的参数：' + trainVars.reduce(function (a, v) { return a + v.size; }, 0) +
+          (headOnly ? '（仅输出层）' : '（全部）'));
+
+      // ---- 4) 训练：加权损失 ----
+      var oldModel = model;          // 留着做前后对比
+      model = fresh;
+      var batchSize = clamp(parseInt($('pBatch').value, 10) || 64, 8, 512);
+      var t0 = performance.now();
+      var lossHist = [], valHist = [];
+
+      for (var ep = 0; ep < epochs; ep++) {
+        // 每轮重新打乱
+        for (var y = trainOrder.length - 1; y > 0; y--) {
+          var m2 = Math.floor(Math.random() * (y + 1));
+          var tm = trainOrder[y]; trainOrder[y] = trainOrder[m2]; trainOrder[m2] = tm;
+        }
+        var epStart = performance.now();
+        var lossSum = 0, nb = 0;
+
+        for (var b = 0; b < trainOrder.length; b += batchSize) {
+          var to = Math.min(trainOrder.length, b + batchSize);
+          var bt = makeBatch(trainOrder, b, to, inSize, weights);
+          var lv = opt.minimize(function () {
+            var logits = model.apply(bt.xs, { training: true });
+            // 逐样本损失再按权重平均 —— 这是「让模型重点学我改过的地方」
+            // 的实现方式。注意必须显式传 Reduction.NONE：
+            // softmaxCrossEntropy 默认会直接归约成标量，那样就没法逐样本加权了。
+            var perSample = tf.losses.softmaxCrossEntropy(
+              bt.ys, logits, undefined, 0, tf.Reduction.NONE
+            );
+            return perSample.mul(bt.w).mean();
+          }, true, trainVars);
+          lossSum += lv.dataSync()[0];
+          lv.dispose();
+          bt.xs.dispose(); bt.ys.dispose();
+          if (bt.w) bt.w.dispose();
+          nb++;
+        }
+
+        var epMs = performance.now() - epStart;
+        var vAcc = await quickValAcc();
+        lossHist.push(lossSum / Math.max(1, nb));
+        valHist.push(vAcc);
+        var el = (performance.now() - t0) / 1000;
+        var remain = (epochs - ep - 1) * (el / (ep + 1));
+
+        $('ftProg').style.width = ((ep + 1) / epochs * 100) + '%';
+        $('ftStat').innerHTML = '第 ' + (ep + 1) + '/' + epochs + ' 轮 · loss <b>' +
+          fmt(lossSum / Math.max(1, nb), 4) + '</b> · 验证 <b>' +
+          fmt(vAcc * 100, 1) + '%</b><br><span class="muted">已用 ' +
+          fmt(el, 0) + 's' + (remain > 1 ? ' · 预计还需 ' + fmt(remain, 0) + 's' : '') + '</span>';
+        if (ep % 2 === 1) await yieldTick();
+      }
+
+      var total = (performance.now() - t0) / 1000;
+
+      // ---- 5) 前后对比：修正的格子现在学对了没有 ----
+      var before = 0, after = 0;
+      var bt2 = makeBatch(fixIdx, 0, fixIdx.length, inSize, null);
+      function argmaxAll(m) {
+        var t = tf.tidy(function () {
+          return tf.argMax(m.apply(bt2.xs, { training: false }), -1);
+        });
+        var d = t.dataSync();
+        t.dispose();
+        return d;
+      }
+      var predsAfter = argmaxAll(model);
+      var predsBefore = oldModel ? argmaxAll(oldModel) : null;
+      var truth = [];
+      for (var fi2 = 0; fi2 < fixIdx.length; fi2++) {
+        var row = trainY.subarray(fixIdx[fi2] * NC, fixIdx[fi2] * NC + NC);
+        var best = 0;
+        for (var cc = 1; cc < NC; cc++) if (row[cc] > row[best]) best = cc;
+        truth.push(best);
+        if (predsBefore && predsBefore[fi2] === best) before++;
+        if (predsAfter[fi2] === best) after++;
+      }
+      bt2.xs.dispose(); if (bt2.ys) bt2.ys.dispose();
+
+      // ---- 6) 保留旧模型，方便对比后决定留不留 ----
+      var stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 13);
+      await saveModelToDb('微调-' + stamp, {
+        desc: '修正 ' + fixIdx.length + ' 格 · ' + epochs + ' 轮 · lr ' +
+              lr.toExponential(0) + (headOnly ? ' · 仅输出层' : '')
+      });
+      await refreshSavedModels();
+
+      $('ftStat').innerHTML += '<br><span class="muted">完成，共 ' + fmt(total, 0) + 's</span>';
+      $('ftCompare').innerHTML =
+        '<div class="statline"><span>修正的 ' + fixIdx.length + ' 格，现在学对了</span>' +
+        '<b class="big">' + after + '/' + fixIdx.length + '</b></div>' +
+        (predsBefore
+          ? '<div class="statline"><span>微调前就对了</span><b>' + before + '/' + fixIdx.length + '</b></div>'
+          : '') +
+        '<div class="statline"><span>验证集准确率</span><b>' + fmt(valHist[valHist.length - 1] * 100, 2) + '%</b></div>' +
+        '<div class="statline"><span>耗时</span><b>' + fmt(total, 0) + 's</b></div>';
+
+      log('微调完成：修正 ' + fixIdx.length + ' 格中，学对 ' + after + ' 格' +
+          (predsBefore ? '（微调前 ' + before + ' 格）' : '') +
+          ' · 验证 ' + fmt(valHist[valHist.length - 1] * 100, 2) + '%');
+
+      drawLossCurve(lossHist, valHist);
+      $('resultCard').hidden = false;
+      renderSamples();
+      refreshFinetunePanel();
+      toast('微调完成：修正的格子学对 ' + after + '/' + fixIdx.length, 3600);
+    } catch (e) {
+      log('微调失败：' + e.message);
+      toast('微调失败：' + e.message);
+    }
+
+    if (native()) native().keepAwake(false);
+    $('btnFinetune').disabled = false;
+  });
+
   // ---------------------------------------------------------------- 保存 / 导出
 
   var currentMeta = null;
@@ -2970,6 +3350,51 @@
                dbg: clean.__dbg,
                w: clean.width, h: clean.height, conf: s.conf,
                lattice: s.lattice, cells: s.cells };
+    },
+    /** 纠错闭环的内部状态，供自动化核对用 */
+    ft: function () {
+      var s = currentSample();
+      var nFix = 0, nAuto = 0;
+      samples.forEach(function (x) {
+        if (x.fixed) for (var i = 0; i < CELLS; i++) if (x.fixed[i]) nFix++;
+        if (x.auto) for (var j = 0; j < CELLS; j++) if (x.auto[j]) nAuto++;
+      });
+      return {
+        hasModel: !!model,
+        modelParams: model && model.countParams ? model.countParams() : 0,
+        inSize: inSize,
+        backtestCount: Object.keys(backtest).length,
+        showPred: showPred,
+        lastPredIsSet: !!lastPred,
+        trainSamples: trainX ? trainX.length / (inSize * inSize * 3) : 0,
+        trainFixedCount: trainFixed ? trainFixed.reduce(function (a, v) { return a + v; }, 0) : 0,
+        savedModels: savedModels.length,
+        currentFixed: s && s.fixed ? s.fixed.reduce(function (a, v) { return a + v; }, 0) : 0,
+        samplesWithFix: samples.filter(function (x) {
+          return x.fixed && x.fixed.some(function (v) { return v; });
+        }).length,
+        totalFixed: nFix,
+        totalAuto: nAuto
+      };
+    },
+    /**
+     * 模拟人工核对：当前 s.cells 就是真值，把与模型预测不同的格子标成「修正」。
+     * 语义上等价于"用户看了模型预测，不同意，把这几格改成对的"。
+     */
+    applyTruth: function () {
+      var s = currentSample();
+      if (!s || !s.lattice || !lastPred) return -1;
+      s.cells = s.cells || new Array(CELLS).fill(0);
+      s.fixed = s.fixed || new Array(CELLS).fill(0);
+      var n = 0;
+      for (var i = 0; i < CELLS; i++) {
+        s.fixed[i] = (s.cells[i] === lastPred[i]) ? 0 : 1;
+        if (s.fixed[i]) n++;
+      }
+      queueSave(s);
+      renderStage();
+      renderSamples();
+      return n;
     },
     /** 标注数据，供自动化核对用 */
     cells: function () {

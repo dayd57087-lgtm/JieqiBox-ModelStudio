@@ -152,6 +152,38 @@
     <div id="etaText" class="muted tiny"></div>
   </div>
 
+  <!--
+    纠错微调。
+    用途：回测里看到模型错了几格 → 在标注页改对 → 从这里以现有模型为起点
+    再学一遍。只学「改了什么」，用回放防止把别的忘掉。
+  -->
+  <div class="card accent" id="finetuneCard">
+    <h2>纠错微调</h2>
+    <div id="ftSummary" class="muted tiny mb6">
+      回测发现问题后，到「标注」页用「对比模型」改掉错处，这里就能让模型只学那些改动。
+    </div>
+    <div class="params">
+      <label class="wide">起点模型
+        <select id="ftBase"></select>
+      </label>
+      <label>修正权重 <input type="number" id="ftWeight" value="6" min="1" max="50"></label>
+      <label>回放比例 <input type="number" id="ftReplay" value="70" min="0" max="100" step="5"></label>
+      <label>轮数 <input type="number" id="ftEpochs" value="12" min="1" max="100"></label>
+      <label>学习率 <input type="number" id="ftLr" value="1" min="1" max="100" step="1"></label>
+    </div>
+    <div class="switch mt8">
+      <span>只训最后一层（快，且不会破坏已学好的特征）</span>
+      <input type="checkbox" id="ftHeadOnly">
+    </div>
+    <div class="row mt8">
+      <button id="btnFinetune" class="primary">开始纠错微调</button>
+      <span class="muted tiny" style="margin-left:auto">学习率单位 1e-4</span>
+    </div>
+    <div class="bar mt8"><i id="ftProg"></i></div>
+    <div id="ftStat" class="muted tiny mt6">—</div>
+    <div id="ftCompare" class="mt8"></div>
+  </div>
+
   <div class="card" id="resultCard" hidden>
     <h2>结果</h2>
     <div id="evalStat"></div>
