@@ -577,6 +577,7 @@
     showPred = false;
     lastPred = null;
     updateModeButtons();
+    updateCompareBar();     // 提示栏必须跟着状态走，否则会留着上一张的显示
     closeSheet();
     go('annotate');
     if (compare) {
@@ -2474,13 +2475,27 @@
   $('btnCheckModel').addEventListener('click', async function () {
     var s = currentSample();
     if (!s || !s.lattice) { toast('先框选标定棋盘'); return; }
-    if (!model) { toast('先在「训练」页训一次，或到「模型」页载入一个模型'); return; }
 
     if (showPred) {
       showPred = false;
       updateCompareBar();
       renderStage();
       return;
+    }
+
+    // 没载入模型就自动取最新的 —— 和回测一样，模型就在库里，没必要让用户先手动载入
+    if (!model) {
+      if (!savedModels.length) { toast('还没有模型 —— 先到「训练」页跑一次', 3200); return; }
+      setBusy(true, '载入模型', savedModels[0].name);
+      try {
+        await loadModelFromRecord(savedModels[0]);
+        setBusy(false);
+        refreshFinetunePanel();
+      } catch (e) {
+        setBusy(false);
+        toast('载入模型失败：' + e.message, 3600);
+        return;
+      }
     }
 
     if (backtest[s.key]) {
@@ -2596,7 +2611,10 @@
       return;
     }
     var target = list[next];
-    openAnnotate(samples.indexOf(target), false);
+    // 正在核对时翻页，下一张也直接进核对 ——
+    // 否则按「下一个」会悄悄退出核对模式，用户还得再点一次「对比模型」
+    var keepCompare = !!showPred;
+    openAnnotate(samples.indexOf(target), keepCompare);
   }
 
   $('btnPrev').addEventListener('click', function () { stepSample(-1); });
@@ -2698,6 +2716,23 @@
     $('btnBuild').textContent = '构建中…';
     log('开始构建数据集，输入尺寸 ' + inSize);
 
+    try {
+      return await buildDatasetInner(u);
+    } catch (e) {
+      // 不接住的话按钮会永远停在「构建中…」——
+      // 用户看到的就是"点了没反应 / 卡住了"，而不是一个明确的失败
+      log('构建数据集失败：' + (e && e.message ? e.message : e));
+      console.error(e);
+      toast('构建失败：' + (e && e.message ? e.message : e), 4200);
+      return false;
+    } finally {
+      $('btnBuild').disabled = false;
+      $('btnBuild').textContent = '构建数据集';
+    }
+  }
+
+  /** 构建数据集的主体。拆出来是为了让外层统一管错误与按钮状态 */
+  async function buildDatasetInner(u) {
     valKeys = splitValKeys(u);
 
     var keepEmpty = clamp(parseInt($('pEmpty').value, 10) / 100, 0, 1);
@@ -2707,11 +2742,20 @@
     var trFix = [], vaFix = [];
     var px = inSize * inSize * 3;
 
+    /*
+     * 内存预估。切片先按 Uint8 收着，最后才转成 float32 ——
+     * float32 是 Uint8 的 4 倍，这一步是峰值。
+     * 样本多的时候提前说一声，比中途崩掉好。
+     */
+    var estBytes = u.length * CELLS * px * 5;   // 4 倍 float + 1 倍 Uint8 缓冲
+    log('预计需要约 ' + fmt(estBytes / 1048576, 0) + ' MB 内存（' + u.length +
+        ' 张 × ' + CELLS + ' 格 × ' + inSize + '×' + inSize + '）');
+
     for (var n = 0; n < u.length; n++) {
       var s = u[n];
       var img = await imageOf(s);
       var slice = cropCells(img, s.lattice, s.w, s.h, inSize);
-      var isVal = !!valSet[s.key];
+      var isVal = !!valKeys[s.key];
       for (var c = 0; c < CELLS; c++) {
         var lab = s.cells[c];
         if (lab === 0 && Math.random() > keepEmpty) continue;
@@ -2757,8 +2801,6 @@
       (nFix ? '<br><span style="color:#7b5cff">人工修正 <b>' + nFix +
         '</b> 格 —— 可用「纠错微调」让模型从这里学</span>' : '');
 
-    $('btnBuild').disabled = false;
-    $('btnBuild').textContent = '构建数据集';
     $('btnTrain').disabled = false;
     $('btnPreviewCells').disabled = false;
     refreshFinetunePanel();
