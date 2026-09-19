@@ -433,6 +433,8 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val TAG = "ModelStudio"
+
         /** 截图导入时的长边上限，与网页端 MAX_EDGE 保持一致 */
         private const val MAX_EDGE = 1600
 
