@@ -459,6 +459,15 @@ class MainActivity : Activity() {
      *
      * TYPE_APPLICATION_OVERLAY 需要「显示在其他应用上层」权限，
      * 没授权就静默跳过 —— 采集本身不依赖悬浮窗，它只是状态显示。
+     *
+     * 返回值 = **用户有没有给权限**，不是"窗口建成了没有"。
+     * 建窗口是排进主线程异步做的，这里同步拿不到结果，也不该等 ——
+     * 调用方（CaptureBridge.start）真正需要知道的只有"用户有没有地方点开始"。
+     *
+     * 注意：这个函数可能在 JavaBridge 线程上被调用，所以它自己不许碰视图 ——
+     * 碰视图的部分交给 CaptureOverlay 在主线程做。曾经这里直接 addView，
+     * 导致悬浮窗的 ViewRootImpl 被认领给了 JavaBridge 线程，
+     * 半秒后主线程刷一次文字就 CalledFromWrongThreadException 闪退。
      */
     private fun showCaptureOverlay(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
@@ -470,10 +479,9 @@ class MainActivity : Activity() {
                 // 用 applicationContext：悬浮窗的存活时间比 Activity 长得多
                 // （用户要切到别的应用去下棋），拿 Activity 当上下文
                 // 一旦它被回收，之后每次更新窗口都会 BadTokenException
-                val ov = CaptureOverlay(applicationContext)
-                ov.show()
+                CaptureOverlay(applicationContext).show()
             }
-            CaptureOverlay.instance != null
+            true
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to show capture overlay", t)
             false
@@ -481,7 +489,7 @@ class MainActivity : Activity() {
     }
 
     private fun hideCaptureOverlay() {
-        try { CaptureOverlay.instance?.hide() } catch (e: Exception) { /* 忽略 */ }
+        try { CaptureOverlay.instance?.hide() } catch (t: Throwable) { /* 忽略 */ }
     }
 
     private fun candidateDir(): java.io.File? {

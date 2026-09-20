@@ -5618,6 +5618,39 @@
   };
 
   // ---------------------------------------------------------------- 启动
+
+  // == crash-brief:start ==
+  /**
+   * 从崩溃堆栈里挑出「最该看的两行」。
+   *
+   * 上次只把整段截前 90 个字符，结果提示停在
+   * "android.view.ViewRootImpl$CalledFromWrongThreadEx…" ——
+   * 类名都没显示全，更没有崩在哪一行，等于白记。
+   * 这几行才是关键：异常类型 + 第一个业务栈帧。
+   */
+  function crashBrief(trace) {
+    // 异常行长得很有特征：一整条类名（带包路径）以 Exception/Error/Throwable 结尾。
+    // 不能只搜 "Exception|Error" —— 设备型号里也可能带 Error 字样，那就会被当成异常行。
+    var HEAD_RE = /^(?:[A-Za-z_$][\w$]*\.)+(?:[A-Za-z_$][\w$]*)?(?:Exception|Error|Throwable)\b/;
+    var lines = String(trace || '').split('\n');
+    var head = '', frame = '';
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i].trim();
+      if (!l) continue;
+      if (!head && HEAD_RE.test(l)) {
+        head = l;
+        continue;                      // 异常行之后的第一个 "at …" 才是我们要的帧
+      }
+      if (head && !frame && l.indexOf('at ') === 0) {
+        frame = l.slice(3);
+        break;
+      }
+    }
+    if (!head) head = (lines[0] || '').trim() || '未知错误';
+    return frame ? (head + '\n' + frame) : head;
+  }
+  // == crash-brief:end ==
+
   async function boot() {
     renderPalette();
     bindStage();
@@ -5635,11 +5668,9 @@
       if (nat && typeof nat.lastCrash === 'function') {
         var trace = nat.lastCrash() || '';
         if (trace) {
-          var first = trace.split('\n').filter(function (l) {
-            return l.indexOf('Exception') >= 0 || l.indexOf('Error') >= 0;
-          })[0] || trace.split('\n')[0];
+          var brief = crashBrief(trace);
           log('上次崩溃：' + trace);
-          toast('上次崩溃：' + first.slice(0, 90), 6000);
+          toast('上次崩溃：' + brief, 9000);
           if (typeof nat.clearCrash === 'function') nat.clearCrash();
         }
       }
