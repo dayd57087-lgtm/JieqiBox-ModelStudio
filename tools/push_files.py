@@ -62,18 +62,20 @@ def main():
     if not args:
         sys.exit(__doc__)
 
-    msg_file = None
+    # 注意：--text 模式下「所有」剩余参数都是文件路径。
+    # 早先写成 args[0] 当 message、args[1:] 当路径，结果第一个文件被
+    # 当成消息悄悄吃掉 —— 这类"少推一个文件还不报错"的坑最难发现。
     if args[0] == "--text":
-        msg_file = args[1]
-        args = args[2:]
-    if len(args) < 2:
-        sys.exit(__doc__)
-
-    message = args[0]
-    paths = args[1:]
-    if msg_file:
-        with open(msg_file, encoding="utf-8") as f:
+        if len(args) < 3:
+            sys.exit(__doc__)
+        with open(args[1], encoding="utf-8") as f:
             message = f.read().strip()
+        paths = args[2:]
+    else:
+        message = args[0]
+        paths = args[1:]
+        if not paths:
+            sys.exit(__doc__)
 
     parent = call("GET", "/repos/%s/git/ref/heads/%s" % (REPO, BRANCH))["object"]["sha"]
     base_tree = call("GET", "/repos/%s/git/commits/%s" % (REPO, parent))["tree"]["sha"]

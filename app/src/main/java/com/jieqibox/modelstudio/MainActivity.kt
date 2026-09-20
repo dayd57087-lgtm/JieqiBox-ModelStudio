@@ -90,6 +90,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        installCrashLogger()
+
         assetLoader = WebViewAssetLoader.Builder()
             .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
             .build()
@@ -247,7 +249,49 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    /** 暴露给网页的原生能力，通过 window.StudioNative 调用。 */
+    /* ------------------------------------------------------------------ */
+    /* 崩溃记录                                                            */
+    /*                                                                     */
+    /* 悬浮窗采集这类代码，出问题的地方常常在用户那边才有（具体机型、        */
+    /* 具体时序），而应用一崩就什么都不剩了。所以自己记一份：写进应用私有    */
+    /* 目录，下次打开时提示出来 —— 至少要能说出「崩在哪一行」。            */
+    /* ------------------------------------------------------------------ */
+
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                val sw = java.io.StringWriter()
+                error.printStackTrace(java.io.PrintWriter(sw))
+                val text = "时间: " + java.text.SimpleDateFormat(
+                    "yyyy-MM-dd HH:mm:ss", java.util.Locale.US
+                ).format(java.util.Date()) +
+                    "\n线程: " + thread.name +
+                    "\n版本: " + BuildConfig.VERSION_NAME +
+                    "\n设备: " + Build.MANUFACTURER + " " + Build.MODEL +
+                    " / Android " + Build.VERSION.SDK_INT +
+                    "\n\n" + sw.toString()
+                java.io.File(filesDir, CRASH_FILE).writeText(text)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to write crash log", t)
+            }
+            // 无论如何都交回给系统，崩溃该退出的还是要退出
+            previous?.uncaughtException(thread, error)
+        }
+    }
+
+    private fun readCrashLog(): String = try {
+        val f = java.io.File(filesDir, CRASH_FILE)
+        if (f.exists()) f.readText() else ""
+    } catch (t: Throwable) {
+        ""
+    }
+
+    private fun clearCrashLog() {
+        try { java.io.File(filesDir, CRASH_FILE).delete() } catch (t: Throwable) { /* 忽略 */ }
+    }
+
+    /** 暴露给网页：window.StudioNative */
     inner class Bridge {
 
         @JavascriptInterface
@@ -295,6 +339,15 @@ class MainActivity : Activity() {
         /** 供 WebView 内下载引擎判断模型体积，避免误报。 */
         @JavascriptInterface
         fun supportedAbis(): String = Build.SUPPORTED_ABIS.joinToString(",")
+
+        /** 上次崩溃的堆栈，没有就返回空串 */
+        @JavascriptInterface
+        fun lastCrash(): String = readCrashLog()
+
+        @JavascriptInterface
+        fun clearCrash() {
+            clearCrashLog()
+        }
     }
 
     /* ------------------------------------------------------------------ */
@@ -732,6 +785,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val TAG = "ModelStudio"
+
+        /** 崩溃堆栈落盘的文件名（应用私有目录，不占用户空间也不需要权限） */
+        private const val CRASH_FILE = "crash-last.txt"
 
         /** 截图导入时的长边上限，与网页端 MAX_EDGE 保持一致 */
         private const val MAX_EDGE = 1600
