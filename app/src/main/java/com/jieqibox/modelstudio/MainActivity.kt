@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.ContentValues
 import android.content.Intent
 import android.content.SharedPreferences
+import android.media.projection.MediaProjectionManager
+import android.provider.Settings
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -13,6 +15,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import android.util.Log
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.ValueCallback
@@ -51,9 +54,36 @@ class MainActivity : Activity() {
     private val fileChooserRequest = 1001
     /** 选截图文件夹用的请求码（SAF 目录授权） */
     private val folderPickRequest = 1002
+    /** 请求截屏授权的请求码 */
+    private val capturePermissionRequest = 1003
 
     private val prefs: SharedPreferences by lazy {
         getSharedPreferences("model-studio", MODE_PRIVATE)
+    }
+
+    // 截屏授权 token。Android 不允许长期保留，每次启动应用都要重新过一遍弹窗，
+    // 而且只能用一次 —— 用完立即清掉。
+    private var pendingProjectionResultCode = 0
+    private var pendingProjectionData: Intent? = null
+
+    /**
+     * 请求截屏授权。
+     *
+     * 用 startActivityForResult 而不是 registerForActivityResult ——
+     * 本 Activity 继承的是 android.app.Activity，而那个方法属于
+     * androidx.activity.ComponentActivity，这里并没有。
+     * 文件夹选择用的也是同一套老 API，保持一致。
+     */
+    private fun requestCapturePermission() {
+        try {
+            val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            @Suppress("DEPRECATION")
+            startActivityForResult(mgr.createScreenCaptureIntent(), capturePermissionRequest)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request capture permission", e)
+            callJs("window.onCapturePermission && " +
+                "window.onCapturePermission(false, '无法打开授权弹窗')")
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -82,6 +112,7 @@ class MainActivity : Activity() {
         webView.isVerticalScrollBarEnabled = false
         webView.addJavascriptInterface(Bridge(), "StudioNative")
         webView.addJavascriptInterface(ShotFolderBridge(), "ShotFolder")
+        webView.addJavascriptInterface(CaptureBridge(), "Capture")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(
@@ -138,6 +169,18 @@ class MainActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == capturePermissionRequest) {
+            if (resultCode == RESULT_OK && data != null) {
+                pendingProjectionResultCode = resultCode
+                pendingProjectionData = data
+                callJs("window.onCapturePermission && window.onCapturePermission(true, '')")
+            } else {
+                pendingProjectionResultCode = 0
+                pendingProjectionData = null
+                callJs("window.onCapturePermission && window.onCapturePermission(false, '已取消')")
+            }
+            return
+        }
         if (requestCode == folderPickRequest) {
             val uri = data?.data
             if (resultCode == RESULT_OK && uri != null) {
@@ -198,6 +241,7 @@ class MainActivity : Activity() {
         if (::webView.isInitialized) {
             webView.removeJavascriptInterface("StudioNative")
             webView.removeJavascriptInterface("ShotFolder")
+            webView.removeJavascriptInterface("Capture")
             webView.destroy()
         }
         super.onDestroy()
@@ -347,6 +391,220 @@ class MainActivity : Activity() {
         } catch (e: OutOfMemoryError) {
             android.util.Log.e(TAG, "readFolderImage OOM", e)
             return ""
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 悬浮窗采集                                                          */
+    /*                                                                     */
+    /* 判据全在原生侧（像素级），所以采集中不依赖 WebView ——                */
+    /* 用户切到对局应用时它照样工作，也不占 WebView 的算力。                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * 显示悬浮窗（如果用户授权过）。
+     *
+     * TYPE_APPLICATION_OVERLAY 需要「显示在其他应用上层」权限，
+     * 没授权就静默跳过 —— 采集本身不依赖悬浮窗，它只是状态显示。
+     */
+    private fun showCaptureOverlay(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Log.i(TAG, "Overlay permission not granted; capture still works without it")
+            return false
+        }
+        return try {
+            if (CaptureOverlay.instance == null) {
+                val ov = CaptureOverlay(this)
+                ov.show()
+            }
+            CaptureOverlay.instance != null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to show capture overlay", e)
+            false
+        }
+    }
+
+    private fun hideCaptureOverlay() {
+        try { CaptureOverlay.instance?.hide() } catch (e: Exception) { /* 忽略 */ }
+    }
+
+    private fun candidateDir(): java.io.File? {
+        val dir = java.io.File(filesDir, CaptureService.CANDIDATE_DIR)
+        if (!dir.exists() && !dir.mkdirs()) return null
+        return dir
+    }
+
+    /** 候选列表：只给名字/大小/时间，图本身按需再读 —— 避免一次传几百 KB */
+    private fun listCandidatesJson(): String {
+        val dir = candidateDir() ?: return "[]"
+        val files = dir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") } ?: return "[]"
+        val arr = org.json.JSONArray()
+        files.sortedByDescending { it.lastModified() }.forEach { f ->
+            val o = org.json.JSONObject()
+            o.put("name", f.name)
+            o.put("size", f.length())
+            o.put("date", f.lastModified())
+            arr.put(o)
+        }
+        return arr.toString()
+    }
+
+    /**
+     * 读一张候选图。
+     *
+     * 候选存的时候已经压到长边 1600、JPEG 90，通常在 200~500 KB。
+     * base64 之后翻三分之一，一次读一张是可以接受的。
+     */
+    private fun readCandidateBase64(name: String): String {
+        return try {
+            val dir = candidateDir() ?: return ""
+            // 只接受文件名，防止路径穿越
+            val safe = java.io.File(name).name
+            val f = java.io.File(dir, safe)
+            if (!f.exists() || !f.isFile) return ""
+            Base64.encodeToString(f.readBytes(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to read candidate", e)
+            ""
+        } catch (e: OutOfMemoryError) {
+            Log.w(TAG, "OOM reading candidate", e)
+            ""
+        }
+    }
+
+    /** 暴露给网页：window.Capture */
+    inner class CaptureBridge {
+
+        @JavascriptInterface
+        fun isSupported(): Boolean = true
+
+        @JavascriptInterface
+        fun hasPermission(): Boolean = pendingProjectionData != null
+
+        @JavascriptInterface
+        fun requestPermission() {
+            runOnUiThread { requestCapturePermission() }
+        }
+
+        @JavascriptInterface
+        fun isCapturing(): Boolean = CaptureService.isRunning()
+
+        @JavascriptInterface
+        fun capturedCount(): Int = CaptureService.instance?.captured() ?: 0
+
+        /**
+         * 开始采集。
+         * @param scale        截帧缩放（省内存，0.5 足够）
+         * @param intervalMs   两次采集的最短间隔
+         * @param stableFrames 连续多少帧稳定才算"走子完成"
+         */
+        @JavascriptInterface
+        fun start(scale: Double, intervalMs: Int, stableFrames: Int): Boolean {
+            val data = pendingProjectionData
+            if (data == null) {
+                callJs("window.onCaptureState && window.onCaptureState(false, '还没有截屏授权')")
+                return false
+            }
+            return try {
+                val intent = Intent(this@MainActivity, CaptureService::class.java).apply {
+                    putExtra(CaptureService.EXTRA_RESULT_CODE, pendingProjectionResultCode)
+                    putExtra(CaptureService.EXTRA_DATA, data)
+                    putExtra(CaptureService.EXTRA_SCALE, scale.toFloat())
+                    putExtra(CaptureService.EXTRA_INTERVAL_MS, intervalMs)
+                    putExtra(CaptureService.EXTRA_STABLE_FRAMES, stableFrames)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+                // token 只能用一次，用完立刻清掉
+                pendingProjectionData = null
+                pendingProjectionResultCode = 0
+
+                showCaptureOverlay()
+                callJs("window.onCaptureState && window.onCaptureState(true, '')")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start capture", e)
+                callJs("window.onCaptureState && " +
+                    "window.onCaptureState(false, '启动失败: ${e.message}')")
+                false
+            }
+        }
+
+        @JavascriptInterface
+        fun stop(): Boolean {
+            return try {
+                CaptureService.instance?.stopCapture()
+                hideCaptureOverlay()
+                callJs("window.onCaptureState && window.onCaptureState(false, '')")
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to stop capture", e)
+                false
+            }
+        }
+
+        /* ---- 悬浮窗 ---- */
+
+        @JavascriptInterface
+        fun canDrawOverlays(): Boolean =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this@MainActivity)
+
+        @JavascriptInterface
+        fun isOverlayShowing(): Boolean = CaptureOverlay.instance?.isShowing() == true
+
+        @JavascriptInterface
+        fun openOverlaySettings() {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return@runOnUiThread
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            android.net.Uri.parse("package:$packageName")
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to open overlay settings", e)
+                }
+            }
+        }
+
+        /* ---- 候选帧 ---- */
+
+        @JavascriptInterface
+        fun candidateCount(): Int {
+            val dir = candidateDir() ?: return 0
+            return dir.listFiles { f -> f.isFile && f.name.endsWith(".jpg") }?.size ?: 0
+        }
+
+        @JavascriptInterface
+        fun listCandidates(): String = listCandidatesJson()
+
+        @JavascriptInterface
+        fun readCandidate(name: String): String = readCandidateBase64(name)
+
+        @JavascriptInterface
+        fun deleteCandidate(name: String): Boolean {
+            return try {
+                val dir = candidateDir() ?: return false
+                java.io.File(dir, java.io.File(name).name).delete()
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        @JavascriptInterface
+        fun clearCandidates(): Boolean {
+            return try {
+                val dir = candidateDir() ?: return false
+                dir.listFiles()?.forEach { it.delete() }
+                true
+            } catch (e: Exception) {
+                false
+            }
         }
     }
 

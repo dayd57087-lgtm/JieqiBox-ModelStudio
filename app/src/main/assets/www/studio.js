@@ -1599,6 +1599,297 @@
     return true;
   }
 
+  // ---------------------------------------------------------------- 悬浮窗采集
+  //
+  // 采集本身在原生侧完成（判据是像素级的，不依赖 WebView），
+  // 这里只做两件事：
+  //   1. 显示状态、启停
+  //   2. 把采到的候选图**筛选**后导入样本库
+
+  function captureBridge() {
+    return (typeof window.Capture !== 'undefined') ? window.Capture : null;
+  }
+
+  function refreshCapture() {
+    var b = captureBridge();
+    var card = $('capCard');
+    if (!card) return;
+
+    if (!b) {
+      $('capBadge').textContent = '需要 Android';
+      $('capStatus').textContent = '浏览器预览模式下不可用。';
+      $('btnCapPermission').disabled = true;
+      $('btnCapStart').disabled = true;
+      $('candCard').hidden = true;
+      return;
+    }
+
+    var running = b.isCapturing();
+    var hasPerm = b.hasPermission();
+    var count = b.capturedCount ? b.capturedCount() : 0;
+
+    $('btnCapPermission').disabled = running;
+    $('btnCapPermission').textContent = hasPerm ? '已授权' : '申请截屏权限';
+    $('btnCapStart').disabled = running || !hasPerm;
+    $('btnCapStart').hidden = running;
+    $('btnCapStop').hidden = !running;
+
+    // 悬浮窗是可选的 —— 采集不依赖它，它只是让你知道它在工作
+    var ovOk = b.canDrawOverlays();
+    $('btnCapOverlay').hidden = ovOk;
+    $('capOverlayState').textContent = ovOk
+      ? (running ? '已显示' : '已授权')
+      : '未授权（不影响采集）';
+
+    if (running) {
+      var phase = '等待走子';
+      $('capStatus').innerHTML = '<span style="color:#3fbf74">● 采集中</span>　已采 <b>' +
+        count + '</b> 张　<span style="color:var(--faint)">切到对局应用下棋即可</span>';
+    } else if (count) {
+      $('capStatus').innerHTML = '已停止　候选里有 <b>' + count + '</b> 张待处理';
+    } else {
+      $('capStatus').textContent = hasPerm ? '未开始（已授权，可以直接开始）' : '未开始';
+    }
+
+    // 候选卡片
+    var candN = b.candidateCount ? b.candidateCount() : 0;
+    $('candCard').hidden = !candN;
+    if (candN) $('candCount').textContent = candN + ' 张';
+  }
+
+  $('btnCapPermission').addEventListener('click', function () {
+    var b = captureBridge();
+    if (!b) return;
+    b.requestPermission();
+  });
+
+  $('btnCapStart').addEventListener('click', function () {
+    var b = captureBridge();
+    if (!b) return;
+    var P = Evolve.snapshotParams();
+    // 间隔用参数里的秒数；稳定帧数也来自参数
+    var ok = b.start(0.5, P.capIntervalSec * 1000, P.capStableFrames);
+    if (ok) {
+      toast('开始采集。切到对局应用下棋，回来点「停止」', 3600);
+    }
+    refreshCapture();
+  });
+
+  $('btnCapStop').addEventListener('click', function () {
+    var b = captureBridge();
+    if (!b) return;
+    b.stop();
+    refreshCapture();
+    toast('已停止采集');
+  });
+
+  $('btnCapOverlay').addEventListener('click', function () {
+    var b = captureBridge();
+    if (!b) return;
+    b.openOverlaySettings();
+    toast('请打开「显示在其他应用上层」，回来点一下刷新', 3600);
+  });
+
+  $('btnCandClear').addEventListener('click', function () {
+    var b = captureBridge();
+    if (!b) return;
+    if (!confirm('丢弃全部候选图？')) return;
+    b.clearCandidates();
+    refreshCapture();
+    toast('候选已清空');
+  });
+
+  /**
+   * 棋盘区域的图片指纹：把棋盘压成 16×16 灰度。
+   *
+   * 用作**第一道去重** —— 比跑识别便宜得多（一次裁切 vs 一次推理），
+   * 而且没有模型时也能用。同局面的两次截图，棋盘区域几乎一样；
+   * 不同局面则差得很明显。
+   */
+  function boardFingerprint(img, lat) {
+    var N = 16;
+    var cv = document.createElement('canvas');
+    cv.width = N; cv.height = N;
+    var c = cv.getContext('2d', { willReadFrequently: true });
+    var IW = img.naturalWidth, IH = img.naturalHeight;
+    var x = (lat.x0 - lat.dx * 0.5) * IW;
+    var y = (lat.y0 - lat.dy * 0.5) * IH;
+    var w = lat.dx * COLS * IW;
+    var h = lat.dy * ROWS * IH;
+    c.drawImage(img, x, y, w, h, 0, 0, N, N);
+    var d = c.getImageData(0, 0, N, N).data;
+    var out = new Uint8Array(N * N);
+    for (var i = 0; i < N * N; i++) {
+      out[i] = (d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114) | 0;
+    }
+    return out;
+  }
+
+  /** 两个指纹的平均绝对差。同局面通常 <3，不同局面 >10 */
+  function fingerprintDiff(a, b2) {
+    var sum = 0;
+    for (var i = 0; i < a.length; i++) sum += Math.abs(a[i] - b2[i]);
+    return sum / a.length;
+  }
+
+  /** 两次识别结果是否算同一个局面（识别有噪声，允许差几格） */
+  function samePosition(a, b2, tol) {
+    var d = 0;
+    for (var i = 0; i < CELLS; i++) {
+      if (a[i] !== b2[i]) {
+        d++;
+        if (d > tol) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 筛选候选并导入。
+   *
+   * 候选是按时间存下来的，但「画面变了」不等于「局面变了」——
+   * 计时器跳动、走子动画都会让画面变化。这里用识别结果做第二道过滤：
+   * 同一局面只保留一张。
+   *
+   * 按**时间正序**处理很关键：判重是拿新的一张和已保留的比，
+   * 顺序反了会保留最后一张而不是第一张（两者都算对，但正序更符合直觉）。
+   */
+  $('btnCandImport').addEventListener('click', async function () {
+    var b = captureBridge();
+    if (!b) return;
+
+    var list;
+    try { list = JSON.parse(b.listCandidates() || '[]'); } catch (e) { list = []; }
+    if (!list.length) { toast('候选里没有图'); return; }
+    list.sort(function (x, y) { return x.date - y.date; });
+
+    var P = Evolve.snapshotParams();
+    var tol = P.capDupTolerance;
+
+    // 有模型就顺带识别，标成「待核对」；没有模型就只导图，标成「待标注」
+    var willRecognize = false;
+    if (!model && savedModels.length) {
+      try {
+        await loadModelFromRecord(savedModels[0]);
+        willRecognize = true;
+      } catch (e) { willRecognize = false; }
+    } else {
+      willRecognize = !!model;
+    }
+
+    var btn = $('btnCandImport');
+    btn.disabled = true;
+    setBusy(true, '筛选候选', '0 / ' + list.length);
+    if (native()) native().keepAwake(true);
+
+    var kept = [], keptCells = [], keptFps = [];
+    var dup = 0, failed = 0, noBoard = 0;
+
+    try {
+      for (var i = 0; i < list.length; i++) {
+        $('busySub').textContent = (i + 1) + ' / ' + list.length;
+
+        var b64 = b.readCandidate(list[i].name);
+        if (!b64) { failed++; continue; }
+
+        var rec = null;
+        try {
+          var blob = await (await fetch('data:image/jpeg;base64,' + b64)).blob();
+          var url = URL.createObjectURL(blob);
+          var img = await loadImage(url);
+          URL.revokeObjectURL(url);
+
+          rec = {
+            key: 'cap-' + list[i].date + '-' + i,
+            name: '悬浮采集 ' + (i + 1),
+            w: img.naturalWidth, h: img.naturalHeight,
+            thumb: makeThumb(img, img.naturalWidth, img.naturalHeight, null),
+            blob: blob, lattice: null, cells: null, auto: null, conf: 0
+          };
+          rec.__img = img;
+
+          // 自动找棋盘。找不到就丢弃 —— 没有棋盘位置的图对训练没用
+          var lat = await calibrateAuto(rec);
+          if (!lat) { noBoard++; continue; }
+
+          // 第一道去重：图片指纹。比识别便宜得多，而且没有模型时也能用
+          var fp = boardFingerprint(img, lat);
+          var imgDup = false;
+          for (var q = 0; q < keptFps.length; q++) {
+            if (fingerprintDiff(fp, keptFps[q]) <= 4) { imgDup = true; break; }
+          }
+          if (imgDup) { dup++; continue; }
+          keptFps.push(fp);
+
+          if (willRecognize && model) {
+            var cells = await predictCells(rec, inSize);
+            var isDup = false;
+            for (var k = 0; k < keptCells.length; k++) {
+              if (samePosition(cells, keptCells[k], tol)) { isDup = true; break; }
+            }
+            if (isDup) { dup++; continue; }
+
+            keptCells.push(cells);
+            rec.cells = Array.prototype.slice.call(cells);
+            // 标成 auto：这是模型猜的，需要你核对
+            rec.auto = rec.cells.map(function (v) { return v > 0 ? 1 : 0; });
+          }
+          kept.push(rec);
+        } catch (e) {
+          failed++;
+          log('候选处理失败 ' + list[i].name + '：' + e.message);
+        }
+        if (i % 2 === 1) await yieldTick();
+      }
+    } catch (e) {
+      log('筛选中断：' + e.message);
+    }
+
+    // 入库
+    for (var m = 0; m < kept.length; m++) {
+      try {
+        delete kept[m].__img;
+        await dbPut(toRecord(kept[m]));
+        samples.push(kept[m]);
+      } catch (e) {
+        log('写入失败 ' + kept[m].name + '：' + e.message);
+      }
+    }
+
+    if (native()) native().keepAwake(false);
+    setBusy(false);
+    btn.disabled = false;
+
+    if (kept.length) b.clearCandidates();
+
+    var msg = '导入 ' + kept.length + ' 张';
+    if (dup) msg += ' · 跳过重复 ' + dup;
+    if (noBoard) msg += ' · 找不到棋盘 ' + noBoard;
+    if (failed) msg += ' · 失败 ' + failed;
+
+    $('candProgress').innerHTML = escapeHtml(msg) +
+      (willRecognize
+        ? '<br>识别结果已标为「待核对」—— 到样本库里核对一下'
+        : '<br>还没有模型，这些图标记为「待标注」');
+
+    renderStats();
+    renderSamples();
+    renderHome();
+    refreshCapture();
+    log('悬浮采集导入：' + msg);
+    toast(msg, 3600);
+  });
+
+  // 原生侧的回调
+  window.onCapturePermission = function (ok, reason) {
+    refreshCapture();
+    toast(ok ? '已获得截屏授权，可以开始采集了' : ('授权失败：' + reason), 3000);
+  };
+  window.onCaptureState = function (running, reason) {
+    refreshCapture();
+    if (!running && reason) toast(reason, 3000);
+  };
+
   // ---------------------------------------------------------------- 演示局面
   // 用内置棋盘图合成带标注的样本，让用户在没有任何截图之前就能跑通全流程。
   var boardImg = null;
@@ -5143,6 +5434,13 @@
     },
     /** 直接触发回测，供自动化核对用 */
     backtest: function () { return runBacktest(); },
+    /** 采集：刷新界面 / 触发候选导入，供自动化核对用 */
+    refreshCapture: function () { refreshCapture(); return true; },
+    importCandidates: function () {
+      var btn = $('btnCandImport');
+      if (btn) btn.click();
+      return true;
+    },
     /** 自进化：手动触发一轮检查，供自动化核对用 */
     readiness: function () { return autoReadiness(); },
     pendingFixes: function () { return pendingFixCount(); },
@@ -5313,6 +5611,7 @@
     refreshFinetunePanel();
     renderAbout();
     refreshCollect();
+    refreshCapture();
     loadEvLog();
     renderPolicy();
     renderParamPanel();

@@ -2,9 +2,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      刻意不申请任何存储权限：截图走系统文件选择器（SAF）导入，
-      每个 URI 自带读授权；导出走 MediaStore.Downloads。零权限。
+      仍然不申请任何存储权限：采集到的候选图写在应用私有目录，
+      导入样本库后再由应用自己管理；导出走 MediaStore.Downloads。
+
+      下面这些只服务于「悬浮窗采集」这一个可选功能 ——
+      不开启采集就完全用不到，应用其余部分仍是零权限。
     -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -26,5 +33,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          采集服务：截屏必须跑在前台服务里（系统硬要求，防止应用偷偷录屏），
+          所以会有一条常驻通知 —— 那个去不掉。
+        -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
     </application>
 </manifest>

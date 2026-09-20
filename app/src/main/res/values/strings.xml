@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">模型工坊</string>
+
+    <!-- 悬浮窗采集 -->
+    <string name="capture_channel_name">采集对局画面</string>
+    <string name="capture_channel_description">自动采集对局截图时显示的常驻通知</string>
+    <string name="capture_notification_title">模型工坊 · 正在采集</string>
+    <string name="capture_notification_text">检测到走子稳定后会自动截图</string>
+    <string name="capture_notification_count">已采 %1$d 张</string>
 </resources>

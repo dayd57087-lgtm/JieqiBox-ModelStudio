@@ -279,6 +279,17 @@
       min: 1, max: 20, step: 1, def: 2,
       hint: '熔断。数据本身有问题时会反复白跑，而你以为是"它自己在进化"。' },
 
+    // ── 采集：决定「什么样的画面值得存」──
+    { key: 'capIntervalSec', group: '采集', label: '两次采集最短间隔', unit: '秒',
+      min: 1, max: 120, step: 1, def: 5,
+      hint: '太短会连采同一步棋的好几张，太长会漏掉下得快的步。' },
+    { key: 'capStableFrames', group: '采集', label: '连续几帧稳定才算走子完成', unit: '帧',
+      min: 1, max: 10, step: 1, def: 3,
+      hint: '走子动画中间也会短暂"稳定"，多确认几帧才不会采到动画。' },
+    { key: 'capDupTolerance', group: '采集', label: '判重容差', unit: '格',
+      min: 0, max: 20, step: 1, def: 3,
+      hint: '识别有噪声，同一局面两次结果可能差一两格。差异在这个范围内视为同一局面。' },
+
     // ── 评估门槛：决定「动了算不算数」──
     // 这一类最容易被忽略，但它决定自动化能不能自己判断好坏
     { key: 'promoteGain', group: '评估', label: '好多少才算真进步', unit: '个点',

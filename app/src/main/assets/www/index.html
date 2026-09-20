@@ -241,6 +241,44 @@
     <span class="sp"></span>
   </header>
   <div class="scroll">
+
+    <!-- 悬浮窗采集：主要的采集方式。判据全在原生侧，切到对局应用照样工作 -->
+    <div class="card accent" id="capCard">
+      <h2>悬浮窗采集 <span class="sp"></span>
+        <span class="muted tiny" id="capBadge"></span></h2>
+      <div class="muted">打开采集后切到对局应用下棋，程序自己判断
+        <b>画面稳定</b>（走子完成）+ <b>局面变了</b>（不是同一盘面）+ <b>间隔够</b>，
+        符合条件才截图。下完回来图已经在候选里了。</div>
+
+      <div id="capStatus" class="autostatus mt8">未开始</div>
+
+      <div class="btnrow mt8">
+        <button id="btnCapPermission" class="sm">申请截屏权限</button>
+        <button id="btnCapStart" class="primary" disabled>开始采集</button>
+        <button id="btnCapStop" class="sm danger-ghost" hidden>停止</button>
+      </div>
+      <div class="btnrow mt8">
+        <span class="muted tiny">悬浮窗</span>
+        <button id="btnCapOverlay" class="sm" hidden>去开启</button>
+        <span class="muted tiny" id="capOverlayState"></span>
+      </div>
+    </div>
+
+    <!-- 候选筛选：把采集到的候选图去重后导入样本库 -->
+    <div class="card" id="candCard" hidden>
+      <h2>候选图 <span class="sp"></span>
+        <span class="muted tiny" id="candCount"></span></h2>
+      <div class="muted tiny" id="candHint">
+        导入时会做两道去重：先比棋盘区域的画面（便宜），再比识别出的局面（准）。
+        有模型的话还会顺带预标注，结果标为「待核对」。
+      </div>
+      <div class="btnrow mt8">
+        <button id="btnCandImport" class="primary">筛选并导入</button>
+        <button id="btnCandClear" class="sm danger-ghost">全部丢弃</button>
+      </div>
+      <div id="candProgress" class="muted tiny mt8"></div>
+    </div>
+
     <div class="card">
       <h2>从截图文件夹导入</h2>
       <div class="muted">手机截图会存到固定文件夹。授权一次之后，
