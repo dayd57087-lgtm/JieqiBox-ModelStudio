@@ -5623,6 +5623,28 @@
     bindStage();
     updateModeButtons();
 
+    /*
+     * 上次是不是崩过。
+     *
+     * 采集那类问题只在真机上、只在某个时刻才现形，而应用一崩就什么都不剩。
+     * 原生侧把堆栈落在私有目录，这里捞出来摆在明面上 ——
+     * 用户看到的那句「上次崩溃：…」就是排查的起点。
+     */
+    try {
+      var nat = native();
+      if (nat && typeof nat.lastCrash === 'function') {
+        var trace = nat.lastCrash() || '';
+        if (trace) {
+          var first = trace.split('\n').filter(function (l) {
+            return l.indexOf('Exception') >= 0 || l.indexOf('Error') >= 0;
+          })[0] || trace.split('\n')[0];
+          log('上次崩溃：' + trace);
+          toast('上次崩溃：' + first.slice(0, 90), 6000);
+          if (typeof nat.clearCrash === 'function') nat.clearCrash();
+        }
+      }
+    } catch (e) { /* 拿不到就算了，不能因为日志把启动搞坏 */ }
+
     var backend = 'cpu';
     try {
       await tf.setBackend('webgl');
