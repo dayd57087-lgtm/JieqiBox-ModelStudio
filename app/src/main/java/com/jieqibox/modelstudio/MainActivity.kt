@@ -414,12 +414,15 @@ class MainActivity : Activity() {
         }
         return try {
             if (CaptureOverlay.instance == null) {
-                val ov = CaptureOverlay(this)
+                // 用 applicationContext：悬浮窗的存活时间比 Activity 长得多
+                // （用户要切到别的应用去下棋），拿 Activity 当上下文
+                // 一旦它被回收，之后每次更新窗口都会 BadTokenException
+                val ov = CaptureOverlay(applicationContext)
                 ov.show()
             }
             CaptureOverlay.instance != null
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to show capture overlay", e)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to show capture overlay", t)
             false
         }
     }
@@ -489,6 +492,34 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun isCapturing(): Boolean = CaptureService.isRunning()
 
+        /**
+         * 是否已经「开拍」。
+         *
+         * 启动采集和开始采集是两件事：点「开始采集」只是把截屏窗口架好
+         * （人还在工坊里，画面里是工坊自己），开拍由用户在对局应用里
+         * 点悬浮窗上的「开始」决定。
+         */
+        @JavascriptInterface
+        fun isArmed(): Boolean = CaptureService.instance?.isArmed() ?: false
+
+        /**
+         * 开拍 / 暂停。
+         *
+         * 悬浮窗上那个「开始」按钮走的是同一条路，网页端只是另一个入口 ——
+         * 没给悬浮窗权限的用户靠的就是这个入口。
+         */
+        @JavascriptInterface
+        fun setArmed(on: Boolean): Boolean {
+            val svc = CaptureService.instance ?: return false
+            return try {
+                svc.setArmed(on)
+                true
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to set armed=$on", t)
+                false
+            }
+        }
+
         @JavascriptInterface
         fun capturedCount(): Int = CaptureService.instance?.captured() ?: 0
 
@@ -506,12 +537,22 @@ class MainActivity : Activity() {
                 return false
             }
             return try {
+                /*
+                 * 先把悬浮窗立起来，再启服务。
+                 *
+                 * 顺序很重要：悬浮窗是用户「点开始」的地方，服务一起来就得知道
+                 * 有没有这个入口。没给悬浮窗权限的话，用户没地方点开始，
+                 * 只能由上层直接把 armed 置上，否则功能看起来就是坏的。
+                 */
+                val overlayOk = showCaptureOverlay()
+
                 val intent = Intent(this@MainActivity, CaptureService::class.java).apply {
                     putExtra(CaptureService.EXTRA_RESULT_CODE, pendingProjectionResultCode)
                     putExtra(CaptureService.EXTRA_DATA, data)
                     putExtra(CaptureService.EXTRA_SCALE, scale.toFloat())
                     putExtra(CaptureService.EXTRA_INTERVAL_MS, intervalMs)
                     putExtra(CaptureService.EXTRA_STABLE_FRAMES, stableFrames)
+                    putExtra(CaptureService.EXTRA_ARM, !overlayOk)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     startForegroundService(intent)
@@ -522,7 +563,6 @@ class MainActivity : Activity() {
                 pendingProjectionData = null
                 pendingProjectionResultCode = 0
 
-                showCaptureOverlay()
                 callJs("window.onCaptureState && window.onCaptureState(true, '')")
                 true
             } catch (e: Exception) {

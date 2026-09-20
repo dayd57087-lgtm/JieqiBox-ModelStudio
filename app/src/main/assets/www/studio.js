@@ -1465,6 +1465,9 @@
         : '还没有授权文件夹。点上面的按钮选一次，之后不用再选。';
     }
     updateBatchInfo();
+    // 顺手刷一次采集卡片：用户多半是刚在别的应用里下完棋回来，
+    // 采了多少张、有没有开拍，都只在原生侧变过
+    if (typeof refreshCapture === 'function') refreshCapture();
   }
 
   $('btnPickFolder').addEventListener('click', function () {
@@ -1610,6 +1613,13 @@
     return (typeof window.Capture !== 'undefined') ? window.Capture : null;
   }
 
+  /*
+   * 这一轮开过采集没有。
+   * 用来区分「还没开始」和「跑过、停了」—— 光看剩余候选数分不出来：
+   * 一张没采到就停下时，两者都是 0。
+   */
+  var capRan = false;
+
   function refreshCapture() {
     var b = captureBridge();
     var card = $('capCard');
@@ -1625,13 +1635,16 @@
     }
 
     var running = b.isCapturing();
+    // 老一点的原生桥没有 isArmed：退化成「跑着就算在采」，至少不会把按钮锁死
+    var armed = (typeof b.isArmed === 'function') ? b.isArmed() : running;
     var hasPerm = b.hasPermission();
     var count = b.capturedCount ? b.capturedCount() : 0;
 
     $('btnCapPermission').disabled = running;
     $('btnCapPermission').textContent = hasPerm ? '已授权' : '申请截屏权限';
-    $('btnCapStart').disabled = running || !hasPerm;
-    $('btnCapStart').hidden = running;
+    // 运行中也要能点：第一次是「架好截屏窗口」，再点一次才是「开拍」
+    $('btnCapStart').disabled = !running && !hasPerm;
+    $('btnCapStart').textContent = armed ? '暂停采集' : '开始采集';
     $('btnCapStop').hidden = !running;
 
     // 悬浮窗是可选的 —— 采集不依赖它，它只是让你知道它在工作
@@ -1641,12 +1654,18 @@
       ? (running ? '已显示' : '已授权')
       : '未授权（不影响采集）';
 
-    if (running) {
-      var phase = '等待走子';
+    if (running && armed) {
       $('capStatus').innerHTML = '<span style="color:#3fbf74">● 采集中</span>　已采 <b>' +
         count + '</b> 张　<span style="color:var(--faint)">切到对局应用下棋即可</span>';
+    } else if (running) {
+      $('capStatus').innerHTML = '<span style="color:#e0a33a">● 已就绪，还没开拍</span>　' +
+        '<span style="color:var(--faint)">切到对局应用后点悬浮窗上的「开始」，' +
+        '或再点一次「开始采集」</span>';
     } else if (count) {
       $('capStatus').innerHTML = '已停止　候选里有 <b>' + count + '</b> 张待处理';
+    } else if (capRan) {
+      $('capStatus').innerHTML = '已停止　' +
+        '<span style="color:var(--faint)">这一次没有采到图</span>';
     } else {
       $('capStatus').textContent = hasPerm ? '未开始（已授权，可以直接开始）' : '未开始';
     }
@@ -1663,14 +1682,36 @@
     b.requestPermission();
   });
 
+  /*
+   * 开始 / 暂停。
+   *
+   * 分成两步是刻意的：点「开始采集」时人还在工坊里，此刻画面里就是工坊自己。
+   * 如果这时就开始拍，切到对局应用过程中的桌面、加载画面、公告弹窗
+   * 全都会被当成候选存下来 —— 它们占了候选却一张都用不上。
+   * 所以第一次只把截屏窗口架好，等你切过去、摆好局面，再点一下「开始」。
+   */
   $('btnCapStart').addEventListener('click', function () {
     var b = captureBridge();
     if (!b) return;
+
+    if (b.isCapturing()) {
+      if (typeof b.setArmed !== 'function') {
+        toast('这个版本的原生桥不支持开始/暂停', 3000);
+        return;
+      }
+      var armed = (typeof b.isArmed === 'function') ? b.isArmed() : false;
+      b.setArmed(!armed);
+      toast(armed ? '已暂停采集' : '已开始采集', 2600);
+      refreshCapture();
+      return;
+    }
+
     var P = Evolve.snapshotParams();
     // 间隔用参数里的秒数；稳定帧数也来自参数
     var ok = b.start(0.5, P.capIntervalSec * 1000, P.capStableFrames);
     if (ok) {
-      toast('开始采集。切到对局应用下棋，回来点「停止」', 3600);
+      capRan = true;
+      toast('已就绪。切到对局应用，点悬浮窗上的「开始」后才开始采集', 4200);
     }
     refreshCapture();
   });

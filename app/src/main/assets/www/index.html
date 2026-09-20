@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=70">
+<link rel="stylesheet" href="studio.css?v=71">
 </head>
 <body>
 
@@ -246,8 +246,9 @@
     <div class="card accent" id="capCard">
       <h2>悬浮窗采集 <span class="sp"></span>
         <span class="muted tiny" id="capBadge"></span></h2>
-      <div class="muted">打开采集后切到对局应用下棋，程序自己判断
-        <b>画面稳定</b>（走子完成）+ <b>局面变了</b>（不是同一盘面）+ <b>间隔够</b>，
+      <div class="muted">点「开始采集」只是把截屏窗口架好，<b>不会立刻拍任何东西</b> ——
+        这时候画面里还是工坊自己。切到对局应用、摆好局面，再点悬浮窗上的「开始」，
+        它才开始判断 <b>画面稳定</b>（走子完成）+ <b>局面变了</b>（不是同一盘面）+ <b>间隔够</b>，
         符合条件才截图。下完回来图已经在候选里了。</div>
 
       <div id="capStatus" class="autostatus mt8">未开始</div>
@@ -439,9 +440,9 @@
 </div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=70"></script>
-<script src="evolve.js?v=70"></script>
-<script src="onnx-export.js?v=70"></script>
-<script src="studio.js?v=70"></script>
+<script src="lattice.js?v=71"></script>
+<script src="evolve.js?v=71"></script>
+<script src="onnx-export.js?v=71"></script>
+<script src="studio.js?v=71"></script>
 </body>
 </html>

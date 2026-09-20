@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
@@ -50,6 +51,12 @@ class CaptureService : Service() {
         const val EXTRA_SCALE = "scale"
         const val EXTRA_INTERVAL_MS = "intervalMs"
         const val EXTRA_STABLE_FRAMES = "stableFrames"
+
+        /** 启动时就开拍。给了悬浮窗权限时是 false —— 让用户在对局里自己点 */
+        const val EXTRA_ARM = "arm"
+
+        /** 回调主线程用（补采结果要回到悬浮窗上显示） */
+        private val mainHandler = Handler(Looper.getMainLooper())
 
         /** 变化检测用的亮度指纹网格边长 */
         private const val SIGNATURE_GRID = 16
@@ -103,8 +110,25 @@ class CaptureService : Service() {
 
     /** 状态机的当前状态 */
     private enum class Phase { WAITING_CHANGE, MOVING, SETTLING }
+
+    // 状态机由采集线程写、主线程读（悬浮窗每 500ms 刷一次文字），所以要 volatile
+    @Volatile
     private var phase = Phase.WAITING_CHANGE
     private var stableCount = 0
+
+    /**
+     * 是否已「开拍」。
+     *
+     * 启动采集**不等于**开始采集：用户点「开始采集」时只是把截屏窗口架好，
+     * 真正动笔要等他切到对局应用、摆好局面之后再说。
+     * 否则切换过程里的桌面、加载画面都会被当成候选存下来 —— 全是垃圾样本。
+     */
+    @Volatile
+    private var armed = false
+
+    /** 服务是否已经走到 onDestroy。补采回调可能晚于它到达，得有个闸门 */
+    @Volatile
+    private var destroyed = false
 
     @Volatile
     private var lastCaptureTime = 0L
@@ -135,6 +159,8 @@ class CaptureService : Service() {
         captureScale = intent.getFloatExtra(EXTRA_SCALE, 0.5f).coerceIn(0.15f, 1.0f)
         minIntervalMs = intent.getIntExtra(EXTRA_INTERVAL_MS, 5000).toLong().coerceIn(1000L, 120000L)
         stableFramesNeeded = intent.getIntExtra(EXTRA_STABLE_FRAMES, 3).coerceIn(1, 10)
+        // 默认不开拍。只有「没给悬浮窗权限、用户没地方点开始」时才由上层传 true
+        armed = intent.getBooleanExtra(EXTRA_ARM, false)
 
         if (data == null || resultCode == 0) {
             Log.w(TAG, "Missing projection token")
@@ -155,6 +181,9 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        // 先立旗：补采可能已经排进采集线程的队列，等它跑到时服务已经没了
+        destroyed = true
+        armed = false
         releaseProjection()
         instance = null
         super.onDestroy()
@@ -335,6 +364,10 @@ class CaptureService : Service() {
      * 之所以需要它：画面静止时变化率一直很低，如果只看"稳定就采"，
      * 会每隔几秒存一张一模一样的图。必须先等到画面动过（走子），
      * 再等它稳定下来（走子完成），这才是"一个新的局面"。
+     *
+     * 注意：**指纹照常算、状态机照常走**，只是没开拍时不落盘。
+     * 一直喂着指纹，用户一点「开始」就能立刻进入正确状态，
+     * 不需要等下一个走子才发现画面已经变了。
      */
     private fun stepStateMachine(ratio: Double) {
         when (phase) {
@@ -360,7 +393,7 @@ class CaptureService : Service() {
                     stableCount++
                     if (stableCount >= stableFramesNeeded) {
                         val now = System.currentTimeMillis()
-                        if (now - lastCaptureTime >= minIntervalMs) {
+                        if (armed && now - lastCaptureTime >= minIntervalMs) {
                             if (saveCandidate()) {
                                 lastCaptureTime = now
                                 capturedCount++
@@ -368,7 +401,7 @@ class CaptureService : Service() {
                                 notifyOverlay()
                             }
                         }
-                        // 无论存没存（可能是间隔不够被跳过），都回去等下一次变化
+                        // 无论存没存（没开拍 / 间隔不够被跳过），都回去等下一次变化
                         phase = Phase.WAITING_CHANGE
                         stableCount = 0
                     }
@@ -377,20 +410,63 @@ class CaptureService : Service() {
         }
     }
 
-    /** 手动补采：无视状态机，直接存当前这一帧 */
+    /**
+     * 手动补采：无视状态机，直接存当前这一帧。
+     *
+     * ⚠️ 里面要编码一整帧 JPEG（几十到上百毫秒），**必须在后台线程调用**。
+     *    悬浮窗请走 captureNowAsync()；直接在 onClick 里调它会卡住整个
+     *    应用的主线程 —— 用户这时候人还在对局应用里，卡的是我们自己的进程。
+     */
     fun captureNow(): Boolean {
-        val now = System.currentTimeMillis()
-        val ok = saveCandidate()
-        if (ok) {
-            lastCaptureTime = now
-            capturedCount++
-            updateNotification(capturedCount)
-            notifyOverlay()
-            // 手采之后回到等变化，避免立刻又自动采一张
-            phase = Phase.WAITING_CHANGE
-            stableCount = 0
+        if (destroyed) return false
+        return try {
+            val ok = saveCandidate()
+            if (ok) {
+                lastCaptureTime = System.currentTimeMillis()
+                capturedCount++
+                updateNotification(capturedCount)
+                notifyOverlay()
+                // 手采之后回到等变化，避免立刻又自动采一张
+                phase = Phase.WAITING_CHANGE
+                stableCount = 0
+            }
+            ok
+        } catch (t: Throwable) {
+            /*
+             * 这里必须 catch Throwable，不能只 catch Exception。
+             *
+             * 这条路径的终点是悬浮窗上那个「补采」按钮 —— 用户点一下，
+             * 异常就变成一次闪退，而他对失败原因一无所知。
+             * 位图相关的异常（recycle 之后再用、OOM）恰好都不是 Exception
+             * 的子类能覆盖完的，所以宁可宽一点：失败就报「失败」，
+             * 让功能提示坏掉，也绝不让应用整个退出。
+             */
+            Log.e(TAG, "captureNow failed", t)
+            false
         }
-        return ok
+    }
+
+    /**
+     * 手动补采（异步版）。回调**一定在主线程**触发，可以直接碰 UI。
+     *
+     * 排到采集线程的队列里而不是新开线程：那条队列天然和取帧串行，
+     * 不会出现「补采正在编码时又把 bitmap recycle 掉」这种竞态。
+     */
+    fun captureNowAsync(cb: (Boolean) -> Unit) {
+        val h = handler
+        if (destroyed || h == null) {
+            mainHandler.post { cb(false) }
+            return
+        }
+        try {
+            h.post {
+                val ok = captureNow()
+                mainHandler.post { cb(ok) }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "captureNowAsync post failed", t)
+            mainHandler.post { cb(false) }
+        }
     }
 
     private fun saveCandidate(): Boolean {
@@ -404,8 +480,8 @@ class CaptureService : Service() {
                 FileOutputStream(File(dir, name)).use { it.write(jpeg) }
                 Log.i(TAG, "Candidate saved: $name")
                 true
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to save candidate", e)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to save candidate", t)
                 false
             }
         }
@@ -513,10 +589,38 @@ class CaptureService : Service() {
 
     fun currentChangeRatio(): Double = lastChangeRatio
 
-    fun currentPhase(): String = when (phase) {
-        Phase.WAITING_CHANGE -> "waiting"
-        Phase.MOVING -> "moving"
-        Phase.SETTLING -> "settling"
+    /** 是否已开拍 */
+    fun isArmed(): Boolean = armed
+
+    /**
+     * 开拍 / 暂停。
+     *
+     * 这是「点开始采集」和「真的开始采集」之间那道闸门：
+     * 打开采集只是把截屏窗口架好，开拍之后才落盘。
+     *
+     * 开拍时把状态机重置回「等变化」，并把 lastCaptureTime 清零 ——
+     * 不清的话，刚点完「开始」会因为间隔不够而白白错过第一张。
+     */
+    fun setArmed(on: Boolean) {
+        if (destroyed) return
+        armed = on
+        phase = Phase.WAITING_CHANGE
+        stableCount = 0
+        if (on) lastCaptureTime = 0L
+        try {
+            updateNotification(capturedCount)
+            notifyOverlay()
+        } catch (t: Throwable) {
+            Log.w(TAG, "setArmed: notify failed", t)
+        }
+    }
+
+    /** "idle" 表示还没开拍 —— 悬浮窗据此显示「已就绪 · 点开始」 */
+    fun currentPhase(): String = when {
+        !armed -> "idle"
+        phase == Phase.WAITING_CHANGE -> "waiting"
+        phase == Phase.MOVING -> "moving"
+        else -> "settling"
     }
 
     fun candidateDirRef(): File? = candidateDir(this)
@@ -527,8 +631,10 @@ class CaptureService : Service() {
     }
 
     fun stopCapture() {
+        destroyed = true
+        armed = false
         releaseProjection()
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (t: Throwable) { /* 忽略 */ }
         stopSelf()
     }
 
