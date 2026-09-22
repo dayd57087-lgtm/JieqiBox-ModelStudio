@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>合成样本生成</title>
+<style>
+body{background:#14161a;color:#e6e8eb;font:13px/1.6 ui-monospace,monospace;padding:12px}
+.ok{color:#35c46a}.bad{color:#ff5a5a}.dim{color:#9aa1ad}
+</style>
+</head>
+<body>
+<pre id="out">准备中…</pre>
+<script>
+/*
+ * 给模型工坊造合成样本，用来做端到端验证。
+ *
+ * 目的是回答一个具体问题：**只见过 A 种棋盘主题的模型，换到 B 种主题上还认不认？**
+ * 这正是用户报的「新图全错」。所以造两套主题：
+ *   A —— 浅木色棋盘、深棕线、深红/黑子
+ *   B —— 深蓝灰棋盘、浅灰线、亮红/浅灰子（整体亮度也低一档）
+ * 两套的**字形和布局规则相同，只有配色与明暗不同** —— 于是差异全部落在
+ * 「模型学的是字形还是像素值」这一个变量上。
+ *
+ * 直接写进工坊在用的那个 IndexedDB，所以工坊打开就能看到，不用走导入流程。
+ */
+const DB_NAME = 'model-studio', STORE = 'samples';
+const COLS = 9, ROWS = 10, CELLS = 90;
+
+const THEMES = {
+  A: { bg:'#e8c88a', board:'#f2dcae', line:'#6b4a1f', discR:'#f8eccf', discB:'#f0e8d8',
+       red:'#b01818', black:'#1a1a1a' },
+  B: { bg:'#22272e', board:'#333d4a', line:'#93a8bd', discR:'#cfd6dd', discB:'#c2c9d2',
+       red:'#d84040', black:'#1c2836' }
+};
+
+// 类别名（与 studio.js 的 CLASSES 顺序一一对应，第 0 个是空）
+const GLYPH = ['', 'K','A','E','H','R','C','P', 'k','a','e','h','r','c','p', '*'];
+
+const W = 640, H = 1000;
+// 晶格：x0/y0 是第 0 格（棋盘左上角那个交叉点）的中心，归一化到 0~1
+const LAT = { x0: 64 / W, y0: 200 / H, dx: 64 / W, dy: 64 / H };
+
+const out = document.getElementById('out');
+let buf = '';
+const log = m => { buf += m + '\n'; out.innerHTML = buf; };
+const params = new URLSearchParams(location.search);
+
+function openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE, { keyPath: 'key' });
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+function tx(db, mode, fn) {
+  return new Promise((res, rej) => {
+    const t = db.transaction(STORE, mode);
+    const o = fn(t.objectStore(STORE));
+    t.oncomplete = () => res(o && o.result);
+    // onerror 抓不到事务被 abort 的情况（abort 有自己的事件），
+    // 只挂 onerror 的话，中止的事务会让这个 Promise 永远挂着 —— 表现是静默丢数据。
+    t.onerror = () => rej(t.error);
+    t.onabort = () => rej(t.error || new Error('事务被中止'));
+  });
+}
+
+/** 随机但大致合法的局面：双方各 16 子，摆在自己半场 */
+function randomCells(rand) {
+  const cells = new Array(CELLS).fill(0);
+  const put = (label, r0, r1, count) => {
+    let placed = 0, guard = 0;
+    while (placed < count && guard++ < 500) {
+      const r = r0 + Math.floor(rand() * (r1 - r0 + 1));
+      const c = Math.floor(rand() * COLS);
+      const i = r * COLS + c;
+      if (cells[i]) continue;
+      cells[i] = label; placed++;
+    }
+  };
+  // 黑方在上半（行 0~4）
+  put(8, 0, 1, 1);                       // 将
+  put(9, 0, 1, 2);                       // 士
+  put(10, 0, 2, 2);                      // 象
+  put(11, 1, 3, 2);                      // 马
+  put(12, 0, 3, 2);                      // 车
+  put(13, 1, 3, 2);                      // 炮
+  put(14, 3, 4, 5);                      // 卒
+  // 红方在下半（行 5~9）
+  put(1, 8, 9, 1);                       // 帅
+  put(2, 8, 9, 2);                       // 仕
+  put(3, 7, 9, 2);                       // 相
+  put(4, 6, 8, 2);                       // 马
+  put(5, 6, 9, 2);                       // 车
+  put(6, 6, 8, 2);                       // 炮
+  put(7, 5, 6, 5);                       // 兵
+  return cells;
+}
+
+function drawBoard(themeKey, cells, jitter) {
+  const T = THEMES[themeKey];
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const c = cv.getContext('2d');
+  const x0 = LAT.x0 * W, y0 = LAT.y0 * H, dx = LAT.dx * W, dy = LAT.dy * H;
+
+  c.fillStyle = T.bg; c.fillRect(0, 0, W, H);
+
+  // jitter：把棋盘整体挪几个像素，但**标注里的晶格坐标不变**。
+  // 模拟的是真实场景：自动标定出来的格子位置，和训练时手工框的难免有偏差。
+  // 训练图里没有这种偏差时，模型会对「格子恰好居中」这件事产生依赖。
+  const jx = jitter ? Math.round((Math.random() * 2 - 1) * jitter) : 0;
+  const jy = jitter ? Math.round((Math.random() * 2 - 1) * jitter) : 0;
+  c.save();
+  c.translate(jx, jy);
+
+  const pad = dx * 0.55;
+  c.fillStyle = T.board;
+  c.fillRect(x0 - pad, y0 - pad, dx * 8 + pad * 2, dy * 9 + pad * 2);
+
+  c.strokeStyle = T.line;
+  c.lineWidth = Math.max(1, dx * 0.045);
+  const seg = (ax, ay, bx, by) => {
+    c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+  };
+  for (let r = 0; r < ROWS; r++) seg(x0, y0 + r * dy, x0 + 8 * dx, y0 + r * dy);
+  for (let col = 0; col < COLS; col++) {
+    if (col === 0 || col === COLS - 1) seg(x0 + col * dx, y0, x0 + col * dx, y0 + 9 * dy);
+    else {
+      seg(x0 + col * dx, y0, x0 + col * dx, y0 + 4 * dy);
+      seg(x0 + col * dx, y0 + 5 * dy, x0 + col * dx, y0 + 9 * dy);
+    }
+  }
+
+  for (let i = 0; i < CELLS; i++) {
+    const lab = cells[i];
+    if (!lab) continue;
+    const col = i % COLS, row = (i / COLS) | 0;
+    const cx = x0 + col * dx, cy = y0 + row * dy;
+    const R = dx * 0.43;
+    c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2);
+    c.fillStyle = lab <= 7 ? T.discR : T.discB;
+    c.fill();
+    c.lineWidth = Math.max(1, dx * 0.03);
+    c.strokeStyle = T.line; c.stroke();
+    c.fillStyle = lab <= 7 ? T.red : T.black;
+    c.font = 'bold ' + Math.round(dx * 0.5) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(GLYPH[lab], cx, cy + dx * 0.02);
+  }
+  c.restore();
+  return cv;
+}
+
+/** 简单可复现的伪随机（mulberry32），方便复现同一批图 */
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * canvas → Blob。
+ *
+ * **不要用 cv.toBlob()**。它的回调在部分环境里根本不触发（WebView 实测 100% 超时，
+ * 后台标签页也会丢），于是 await 永远挂着、循环停在中途，而且不报任何错 ——
+ * 现象是"写了 16 张但库里只有 3 张"。工坊的 canvasToBlob 早就因为这个改成 toDataURL，
+ * 这个工具页却又犯了一次。
+ * toDataURL 是同步的，慢一点但不会静默消失。
+ */
+function toBlob(cv) {
+  const url = cv.toDataURL('image/jpeg', 0.9);
+  const bin = atob(url.slice(url.indexOf(',') + 1));
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Blob([u8], { type: 'image/jpeg' });
+}
+
+async function run() {
+  const db = await openDB();
+
+  if (params.get('clear') === '1') {
+    await tx(db, 'readwrite', s => s.clear());
+    log('已清空样本库');
+    window.__done = true;
+    return;
+  }
+
+  const theme = (params.get('theme') || 'A').toUpperCase();
+  const n = parseInt(params.get('n') || '16', 10);
+  const tag = params.get('tag') || theme;
+  const seed0 = parseInt(params.get('seed') || '1234', 10);
+  const jitter = parseInt(params.get('jitter') || '0', 10);
+  log('主题 ' + theme + ' · ' + n + ' 张 · 标签前缀 ' + tag +
+      (jitter ? ' · 标定偏移 ±' + jitter + 'px' : ''));
+
+  // 重新生成同一批标签前先删掉旧的，避免新旧混在一起
+  const existing = await tx(db, 'readonly', s => s.getAll());
+  const stale = (existing || []).filter(r => String(r.key).indexOf('theme' + tag + '_') === 0);
+  for (const r of stale) await tx(db, 'readwrite', s => s.delete(r.key));
+  if (stale.length) log('删掉旧的 ' + stale.length + ' 张');
+
+  for (let k = 0; k < n; k++) {
+    const rand = rng(seed0 + k * 7919);
+    const cells = randomCells(rand);
+    const cv = drawBoard(theme, cells, jitter);
+    const blob = toBlob(cv);
+
+    // 缩略图：只取棋盘范围，和工坊 makeThumb 的口径保持一致
+    const tc = document.createElement('canvas');
+    const bw = LAT.dx * W * 9, bh = LAT.dy * H * 10;
+    tc.width = 200; tc.height = Math.round(200 * bh / bw);
+    tc.getContext('2d').drawImage(cv,
+      Math.max(0, LAT.x0 * W - LAT.dx * W * 0.5),
+      Math.max(0, LAT.y0 * H - LAT.dy * H * 0.5),
+      bw, bh, 0, 0, tc.width, tc.height);
+    const thumb = tc.toDataURL('image/jpeg', 0.72);
+
+    const name = 'theme' + tag + '_' + String(k + 1).padStart(2, '0') + '.jpg';
+    const rec = {
+      key: name + '|' + blob.size + '|0',
+      name: name,
+      w: W, h: H,
+      thumb: thumb,
+      blob: blob,
+      lattice: { x0: LAT.x0, y0: LAT.y0, dx: LAT.dx, dy: LAT.dy },
+      cells: cells,
+      conf: 0, auto: null
+    };
+    await tx(db, 'readwrite', s => s.put(rec));
+  }
+  log('<span class="ok">✓ 写入 ' + n + ' 张（主题 ' + theme + '）</span>');
+
+  // 写完必须读回来数一遍。只看「写循环跑完了」是不够的 ——
+  // 事务可能被中止而 Promise 照样 resolve，现象就是静默少了几条。
+  const back = await tx(db, 'readonly', s => s.getAll());
+  const mine = (back || []).filter(r => String(r.key).indexOf('theme' + tag + '_') === 0);
+  log('库里现在共 ' + (back || []).length + ' 条，其中本次标签 ' + mine.length + ' 条');
+  if (mine.length !== n) {
+    log('<span class="bad">✗ 条数对不上：期望 ' + n + '，实际 ' + mine.length + '</span>');
+  }
+  window.__done = true;
+}
+
+run().catch(e => {
+  log('<span class="bad">✗ 失败：' + (e && e.stack || e) + '</span>');
+  window.__done = true;
+});
+</script>
+</body>
+</html>

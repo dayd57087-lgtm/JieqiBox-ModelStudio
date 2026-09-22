@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>模型工坊</title>
-<link rel="stylesheet" href="studio.css?v=73">
+<link rel="stylesheet" href="studio.css?v=74">
 </head>
 <body>
 
@@ -84,7 +84,20 @@
         <label>保留空格 <input type="number" id="pEmpty" value="30" min="0" max="100" step="5"></label>
         <label>验证图片 <input type="number" id="pVal" value="20" min="10" max="40" step="5"></label>
         <label>早停耐心 <input type="number" id="pPatience" value="10" min="0" max="100"></label>
+        <label>数据增强 <select id="pAug">
+          <option value="off">关</option>
+          <option value="light">轻</option>
+          <option value="normal" selected>标准</option>
+          <option value="strong">强</option>
+        </select></label>
+        <label>标签平滑 <input type="number" id="pSmooth" value="0.05" min="0" max="0.3" step="0.01"></label>
       </div>
+      <div class="hintline mt8"><div class="dot"></div><div>
+        <b>数据增强</b>决定训练时给每张切片加多少随机变化（亮度、色调、位移、遮挡）。
+        它是「换一张新图还认不认」的关键 —— 效果直接看训练结果里的
+        <b>模拟新图准确率</b>。增强越强，原图上的分数越低，新图上越稳。
+        默认的「标准」够日常用；如果你换了别的棋盘皮肤或手机，调到「强」。
+      </div></div>
       <div class="btnrow mt8">
         <button id="btnTrain" class="primary" disabled>开始训练</button>
         <button id="btnStop" class="sm" disabled>停止</button>
@@ -440,9 +453,9 @@
 </div>
 
 <script src="vendor/tf.min.js"></script>
-<script src="lattice.js?v=73"></script>
-<script src="evolve.js?v=73"></script>
-<script src="onnx-export.js?v=73"></script>
-<script src="studio.js?v=73"></script>
+<script src="lattice.js?v=74"></script>
+<script src="evolve.js?v=74"></script>
+<script src="onnx-export.js?v=74"></script>
+<script src="studio.js?v=74"></script>
 </body>
 </html>

@@ -640,3 +640,11 @@ pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; }
 .askbar[hidden] { display: none !important; }
 .askbar__txt { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.5; }
 .askbar__btns { display: flex; gap: 7px; flex: 0 0 auto; }
+
+/* 结论语句的三种语气。
+   原来 predok / predbadge 只出现在 JS 里，样式表里没有定义 ——
+   于是"这个模型可能有问题"的结论和普通说明文字长得一模一样，根本不会被注意到。
+   结论是给人看的，就该有颜色。 */
+.predok { color: #3fbf74; }
+.predmid { color: #e0a33a; }
+.predbadge { color: #ff3b5c; }

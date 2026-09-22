@@ -24,20 +24,35 @@ let buf = '';
 const log = m => { buf += m + '\n'; el.textContent = buf; };
 const $ = (cls, m) => `<span class="${cls}">${m}</span>`;
 
-// 与 studio.js 的 buildModel 保持逐行一致
-function buildModel(size, NC) {
-  const m = tf.sequential();
-  m.add(tf.layers.conv2d({ inputShape: [size, size, 3], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
-  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-  m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }));
-  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-  m.add(tf.layers.conv2d({ filters: 48, kernelSize: 3, padding: 'same', activation: 'relu' }));
-  m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-  m.add(tf.layers.flatten());
-  m.add(tf.layers.dense({ units: 96, activation: 'relu' }));
-  m.add(tf.layers.dropout({ rate: 0.25 }));
-  m.add(tf.layers.dense({ units: NC }));
-  return m;
+/**
+ * 从 studio.js 里把真正的 buildModel 抠出来。
+ *
+ * 以前这里是手抄的副本，注释还写着"与 studio.js 保持逐行一致"——
+ * 结果改了模型结构（加 BN、换通道数）之后副本立刻失真，
+ * 测试通过却在测一个已经不存在的模型。复制粘贴的测试等于没有测试。
+ */
+function extractFn(source, name) {
+  const i = source.indexOf('\n  function ' + name + '(');
+  if (i < 0) throw new Error('找不到函数 ' + name);
+  let depth = 0, started = false;
+  for (let j = i + 3; j < source.length; j++) {
+    const ch = source[j];
+    if (ch === '{') { depth++; started = true; }
+    else if (ch === '}') {
+      depth--;
+      if (started && depth === 0) return source.slice(i, j + 1);
+    }
+  }
+  throw new Error('大括号不配对：' + name);
+}
+
+async function loadRealBuildModel(NC) {
+  const res = await fetch('../app/src/main/assets/www/studio.js');
+  if (!res.ok) throw new Error('取 studio.js 失败：HTTP ' + res.status);
+  const src = await res.text();
+  const fn = extractFn(src, 'buildModel');
+  // buildModel 里引用了全局 NC，靠 new Function 的参数把它喂进去
+  return new Function('tf', 'NC', fn + '\nreturn buildModel;')(tf, NC);
 }
 
 async function run() {
@@ -57,10 +72,27 @@ async function run() {
   const NC = 16;
   let allOk = true;
 
+  let buildModel;
+  try {
+    buildModel = await loadRealBuildModel(NC);
+  } catch (e) {
+    log($('bad', '✗ 从 studio.js 提取 buildModel 失败：' + (e && e.message)));
+    window.__done = true; window.__allOk = false;
+    return;
+  }
+  // 先把层结构打出来，确认抠到的确实是加了 BN 的那一版
+  const probe = buildModel(32);
+  log('层结构：' + probe.layers.map(l => l.getClassName()
+      + (l.activation ? '' : '')).join(' → '));
+  const hasBN = probe.layers.some(l => l.getClassName() === 'BatchNormalization');
+  log(hasBN ? $('ok', '✓ 结构里含 BatchNormalization') : $('bad', '✗ 结构里没有 BN —— 提取到的是旧版？'));
+  if (!hasBN) allOk = false;
+  probe.dispose();
+
   for (const size of [16, 24, 32]) {
     log('');
     log('════ 输入 ' + size + '×' + size + ' ════');
-    const model = buildModel(size, NC);
+    const model = buildModel(size);
     const params = model.countParams();
 
     // 固定随机输入，两边喂同一份数据
@@ -88,8 +120,13 @@ async function run() {
     }
     const kb = (built.bytes.length / 1024).toFixed(0);
     log('ONNX 字节 ' + built.bytes.length + ' (' + kb + ' KB) · 参数 ' + params
-        + ' · conv×' + built.summary.conv + ' pool×' + built.summary.pool
-        + ' dense×' + built.summary.dense);
+        + ' · conv×' + built.summary.conv + ' bn×' + built.summary.bn
+        + ' pool×' + built.summary.pool + ' dense×' + built.summary.dense);
+    if (built.summary.bn !== 4) {
+      log($('bad', '✗ 期望导出 4 个 BatchNormalization（三处卷积 + 一处全连接），实际 '
+          + built.summary.bn));
+      allOk = false;
+    }
 
     // ---- ORT 侧 ----
     let sess;

@@ -3810,10 +3810,18 @@
   $('btnNext').addEventListener('click', function () { stepSample(1); });
 
   // ---------------------------------------------------------------- 切片
-  function cropCells(img, lat, imgW, imgH, out) {
+  /**
+   * 把 90 个格子裁成 size×size 的方块。
+   *
+   * @param offX/offY 裁切中心的额外偏移（像素）。不填就是居中对齐。
+   *   存在的理由见 scanShift()：定位错了和模型不会认，是两回事，
+   *   得能分开测。
+   */
+  function cropCells(img, lat, imgW, imgH, out, offX, offY) {
     var x0 = lat.x0 * imgW, y0 = lat.y0 * imgH;
     var dx = lat.dx * imgW, dy = lat.dy * imgH;
     var side = Math.max(dx, dy) * CROP_K;
+    var ox = offX || 0, oy = offY || 0;
     var cv = document.createElement('canvas');
     cv.width = out; cv.height = out;
     var c = cv.getContext('2d');
@@ -3822,7 +3830,8 @@
     for (var r = 0; r < ROWS; r++) {
       for (var col = 0; col < COLS; col++) {
         c.clearRect(0, 0, out, out);
-        c.drawImage(img, x0 + col * dx - side / 2, y0 + r * dy - side / 2, side, side, 0, 0, out, out);
+        c.drawImage(img, x0 + col * dx - side / 2 + ox, y0 + r * dy - side / 2 + oy,
+                    side, side, 0, 0, out, out);
         var d = c.getImageData(0, 0, out, out).data;
         for (var i = 0; i < out * out; i++) {
           out8[p++] = d[i * 4];
@@ -4032,9 +4041,12 @@
     $('pEmpty').value = empty;
     $('pVal').value = val;
     $('pPatience').value = patience;
+    // 增强不按数据量调档：它要对付的是「场景单一」，跟图多图少没有直接关系。
+    // 只有一种棋盘主题时，一万张图也还是一个场景。
+    if ($('pAug')) $('pAug').value = 'normal';
     log('推荐参数：输入 ' + size + ' · 轮数 ' + epochs + ' · 批 ' + batch +
-        ' · 保留空格 ' + empty + '% · 早停 ' + patience);
-    toast(note, 4200);
+        ' · 保留空格 ' + empty + '% · 早停 ' + patience + ' · 增强 标准');
+    toast(note + ' 数据增强保持「标准」—— 图越少它越关键，别关。', 4600);
   });
 
   $('btnPreviewCells').addEventListener('click', function () {
@@ -4071,19 +4083,190 @@
   });
 
   // ---------------------------------------------------------------- 模型
+  /**
+   * 模型结构。
+   *
+   * 相对上一版的两处关键改动，都是为了同一个目标：**换一张没见过的图也要认**。
+   *
+   * 1) 每个卷积后加 BatchNormalization
+   *    换一部手机、换一种棋盘主题，落到网络里就是「特征分布整体平移」。
+   *    BN 把每层输入重新归一化，模型就不必自己学会「不管输入多亮都给出同样的东西」——
+   *    而那是要靠大量不同场景的样本才学得会的，我们恰恰没有那么多场景的图。
+   *
+   * 2) 第一层 16 → 32 通道，全连接 96 → 128
+   *    16 个 3×3 滤波器画不出几种纹理。棋子之间的区别主要靠字形与颜色，
+   *    容量不够时模型会退化成「记住这块像素长什么样」，而不是「记住这个字长什么样」——
+   *    前者在新图上必然失效。
+   *
+   * 顺序是 conv → BN → relu（不是 conv → relu → BN）：
+   * 先归一化再做非线性，拿到的才是分布稳定的那一层。
+   * conv 关掉 bias —— 紧接着的 BN 本来就会减掉均值，bias 是多余的参数。
+   */
   function buildModel(size) {
     var m = tf.sequential();
-    m.add(tf.layers.conv2d({ inputShape: [size, size, 3], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
-    m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-    m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }));
-    m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
-    m.add(tf.layers.conv2d({ filters: 48, kernelSize: 3, padding: 'same', activation: 'relu' }));
-    m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+
+    function block(filters, first) {
+      var cfg = { filters: filters, kernelSize: 3, padding: 'same', useBias: false };
+      if (first) cfg.inputShape = [size, size, 3];
+      m.add(tf.layers.conv2d(cfg));
+      m.add(tf.layers.batchNormalization());
+      // 用 Activation 层而不是把 activation 塞给 conv2d：
+      // 塞进去的话 BN 就没地方放了（conv2d 只会在输出上直接接激活）
+      m.add(tf.layers.activation({ activation: 'relu' }));
+      m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
+    }
+
+    block(32, true);
+    block(48, false);
+    block(64, false);
+
     m.add(tf.layers.flatten());
-    m.add(tf.layers.dense({ units: 96, activation: 'relu' }));
-    m.add(tf.layers.dropout({ rate: 0.25 }));
+    m.add(tf.layers.dense({ units: 128, activation: 'relu' }));
+    m.add(tf.layers.batchNormalization());
+    m.add(tf.layers.dropout({ rate: 0.3 }));
     m.add(tf.layers.dense({ units: NC }));   // 输出 logits，softmax 交给损失函数
     return m;
+  }
+
+  // ---------------------------------------------------------------- 数据增强
+  //
+  // 这是本次改动里最重要的一块，直接对着「换一张新图就不认了」这个问题。
+  //
+  // 为什么非有不可：训练图和验证图来自**同一次采集** —— 同一部手机、同一个棋盘主题、
+  // 同一个对局、同样的亮度。验证集虽然是按图分的（没有泄漏），但两者分布一模一样。
+  // 所以「验证集 90%」只证明它会认这一种棋盘，不证明它能认新图。
+  // 真到用的时候亮度、主题、裁切位置、遮挡全变了，模型没见过，就全错。
+  //
+  // 增强直接在像素数组上做，不走 tf 张量：一个 batch 也就十几万个数，JS 循环几毫秒，
+  // 但换来完全的自由度 —— 逐样本的亮度/色偏/平移/遮挡可以随意组合，
+  // 不必和张量的广播语义较劲（尤其 Cutout 这种每样本一块不同位置矩形的情况）。
+
+  var AUG_LEVELS = {
+    off:    { label: '关',   bright: 0,    contrast: 0,    chroma: 0,    noise: 0,     shift: 0, cutout: 0,    mixup: 0 },
+    light:  { label: '轻',   bright: 0.10, contrast: 0.08, chroma: 0.04, noise: 0.015, shift: 1, cutout: 0.15, mixup: 0 },
+    normal: { label: '标准', bright: 0.22, contrast: 0.16, chroma: 0.09, noise: 0.030, shift: 2, cutout: 0.35, mixup: 0.20 },
+    strong: { label: '强',   bright: 0.35, contrast: 0.26, chroma: 0.15, noise: 0.050, shift: 3, cutout: 0.50, mixup: 0.30 }
+  };
+
+  function augCfgOf(level) {
+    return AUG_LEVELS[level] || AUG_LEVELS.normal;
+  }
+
+  /** 近似标准正态的随机数：三次均匀分布求和。比 Box-Muller 快，够用 */
+  function randn() {
+    return (Math.random() + Math.random() + Math.random() - 1.5) * 1.1547;
+  }
+
+  /**
+   * 就地把一个 batch 增强。
+   *
+   * 每个样本各自抽一组参数，不是整批用同一套 —— 否则一个 batch 里所有图都变亮同样多，
+   * 相当于只换了个全局常量，模型照样学不到「亮度是会变的」这件事。
+   *
+   * @param xs Float32Array [count × size × size × 3]，值域 [0,1]，就地改写
+   * @param ys Float32Array [count × NC]，只有 Mixup 会动它
+   */
+  function augmentBatch(xs, ys, count, size, C) {
+    var px = size * size * 3;
+    var s = size;
+    var shift = C.shift || 0;
+    // 平移要边读边写，读到的必须是原值 —— 先备份一份
+    var orig = shift > 0 ? xs.slice(0, count * px) : null;
+
+    for (var i = 0; i < count; i++) {
+      var base = i * px;
+
+      var bri = (Math.random() * 2 - 1) * C.bright;
+      var con = 1 + (Math.random() * 2 - 1) * C.contrast;
+      var kr = 1 + (Math.random() * 2 - 1) * C.chroma;
+      var kg = 1 + (Math.random() * 2 - 1) * C.chroma;
+      var kb = 1 + (Math.random() * 2 - 1) * C.chroma;
+      var nz = C.noise || 0;
+      var ox = shift ? Math.round((Math.random() * 2 - 1) * shift) : 0;
+      var oy = shift ? Math.round((Math.random() * 2 - 1) * shift) : 0;
+
+      // Cutout：随机挖掉一块，模拟悬浮窗压住棋盘、通知栏遮住边路的情况
+      var cx0 = 0, cy0 = 0, cw = 0;
+      if (C.cutout > 0 && Math.random() < C.cutout) {
+        cw = Math.max(2, Math.round(s * (0.15 + Math.random() * 0.2)));
+        cx0 = Math.floor(Math.random() * (s - cw + 1));
+        cy0 = Math.floor(Math.random() * (s - cw + 1));
+      }
+
+      for (var y = 0; y < s; y++) {
+        var cutRow = cw && y >= cy0 && y < cy0 + cw;
+        var rowBase = base + y * s * 3;
+        for (var x = 0; x < s; x++) {
+          var o = rowBase + x * 3;
+          var r, g, b;
+
+          if (orig) {
+            var sx = x - ox, sy = y - oy;
+            if (sx < 0 || sx >= s || sy < 0 || sy >= s) {
+              r = 0; g = 0; b = 0;       // 移出边界的部分补黑，和真实裁切越界的样子一致
+            } else {
+              var so = base + (sy * s + sx) * 3;
+              r = orig[so]; g = orig[so + 1]; b = orig[so + 2];
+            }
+          } else {
+            r = xs[o]; g = xs[o + 1]; b = xs[o + 2];
+          }
+
+          // 亮度 / 对比度：绕 0.5 缩放，再整体平移
+          r = (r - 0.5) * con + 0.5 + bri;
+          g = (g - 0.5) * con + 0.5 + bri;
+          b = (b - 0.5) * con + 0.5 + bri;
+
+          // 每通道独立增益：模拟色偏，以及「换了一种棋盘皮肤」的整体色调变化
+          r *= kr; g *= kg; b *= kb;
+
+          if (nz) {
+            r += randn() * nz; g += randn() * nz; b += randn() * nz;
+          }
+
+          if (cutRow && x >= cx0 && x < cx0 + cw) { r = 0; g = 0; b = 0; }
+
+          xs[o] = r < 0 ? 0 : (r > 1 ? 1 : r);
+          xs[o + 1] = g < 0 ? 0 : (g > 1 ? 1 : g);
+          xs[o + 2] = b < 0 ? 0 : (b > 1 ? 1 : b);
+        }
+      }
+    }
+
+    if (C.mixup > 0) mixupBatch(xs, ys, count, s, C.mixup);
+  }
+
+  /**
+   * Mixup：两个样本按比例叠在一起，标签也按同样比例混合。
+   *
+   * 这让模型在两类之间看到「中间态」，被迫学出更宽的决策边界。
+   * 只有一种棋盘主题时它格外有用 —— 模型再也不能靠「这个像素值必然属于兵」
+   * 这种硬判据过关，必须容忍连续变化。
+   *
+   * λ 偏向 1（用 1-u^(1/α) 而不是均匀取样）：混得太狠两张图都看不出是什么子，
+   * 那教给模型的就成了噪声。
+   */
+  function mixupBatch(xs, ys, count, size, alpha) {
+    if (count < 2) return;
+    var px = size * size * 3;
+    var idx = new Int32Array(count);
+    var lam = new Float32Array(count);
+    for (var i = 0; i < count; i++) {
+      idx[i] = Math.floor(Math.random() * count);
+      lam[i] = 1 - Math.pow(Math.random(), 1 / alpha);
+    }
+    for (var a = 0; a < count; a++) {
+      var b = idx[a];
+      if (b === a) continue;              // 自己配自己等于没混
+      var L = lam[a], ba = a * px, bb = b * px;
+      for (var k = 0; k < px; k++) {
+        xs[ba + k] = L * xs[ba + k] + (1 - L) * xs[bb + k];
+      }
+      var ya = a * NC, yb = b * NC;
+      for (var c = 0; c < NC; c++) {
+        ys[ya + c] = L * ys[ya + c] + (1 - L) * ys[yb + c];
+      }
+    }
   }
 
   /**
@@ -4092,24 +4275,49 @@
    * 数据已经归一化并做成 one-hot，这里只做定点搬运：
    * 每行一次 TypedArray.set（memcpy），不再有逐元素的 JS 循环。
    * 这是训练提速的主要来源。
+   *
+   * @param aug    增强配置；只有**训练**才传，验证和回测一律不传（结果必须可比）
+   * @param smooth 标签平滑系数，0 表示保持 one-hot
    */
-  function makeBatch(order, from, to, size, weights) {
+  function makeBatch(order, from, to, size, weights, aug, smooth) {
     var px = size * size * 3;
     var count = to - from;
     var xsArr = new Float32Array(count * px);
     var ysArr = new Float32Array(count * NC);
     var wArr = weights ? new Float32Array(count) : null;
+    var sm = smooth || 0;
     for (var i = 0; i < count; i++) {
       var src = order[from + i];
       xsArr.set(trainX.subarray(src * px, src * px + px), i * px);
-      ysArr.set(trainY.subarray(src * NC, src * NC + NC), i * NC);
+      if (sm > 0) fillSmoothed(ysArr, i, src, sm);
+      else ysArr.set(trainY.subarray(src * NC, src * NC + NC), i * NC);
       if (wArr) wArr[i] = weights[src];
     }
+    if (aug && aug !== AUG_LEVELS.off) augmentBatch(xsArr, ysArr, count, size, aug);
     return {
       xs: tf.tensor4d(xsArr, [count, size, size, 3]),
       ys: tf.tensor2d(ysArr, [count, NC]),
       w: wArr ? tf.tensor1d(wArr) : null
     };
+  }
+
+  /**
+   * 把 one-hot 标签摊平一点：正确类 1 → 1-ε+ε/C，其余 0 → ε/C。
+   *
+   * 为什么对「认新图」有帮助：one-hot 要求模型对每个训练样本都极度自信，
+   * 于是它会把决策边界推到紧贴样本的地方 —— 新图稍微一变就跨过边界判错。
+   * 摊平之后边界附近留出余量，模型「不那么确定」，反而不容易错。
+   * 代价是原图上的准确率会掉一点点，这笔交换是划算的。
+   */
+  function fillSmoothed(ys, row, src, eps) {
+    var off = src * NC, base = eps / NC;
+    var best = 0;
+    for (var c = 1; c < NC; c++) {
+      if (trainY[off + c] > trainY[off + best]) best = c;
+    }
+    var o = row * NC;
+    for (var c2 = 0; c2 < NC; c2++) ys[o + c2] = base;
+    ys[o + best] = 1 - eps + base;
   }
 
   /** 打乱索引。复用同一个缓冲，省掉每轮一次分配 */
@@ -4149,14 +4357,101 @@
     return correct / n;
   }
 
+  /**
+   * 抗扰准确率：给验证集整体施加一次扰动，再测一遍。
+   *
+   * 这是「换新图会不会挂」最接近的模拟。验证图是模型见过的那些图，
+   * 但把亮度、色调、位置、遮挡都改掉之后如果准确率还站得住，
+   * 说明模型学的是**棋子的样子**，而不是这批截图的像素值。
+   *
+   * 与「验证集准确率」的差值就是泛化缺口 —— 这个数字比单纯的准确率
+   * 更能回答用户真正关心的问题。
+   *
+   * 扰动强度比训练时用的更狠一档：训练时看惯的强度不算考验。
+   */
+  async function quickValAccNoisy(level) {
+    var n = valLabelsArr ? valLabelsArr.length : 0;
+    if (!n) return 0;
+    var src = augCfgOf(level);
+    // 必须关掉 Mixup：它会把两张图糊在一起，而标签还是原来的，
+    // 那样测出来的低分是"题目出错了"，不是模型不行。
+    var cfg = {
+      bright: src.bright, contrast: src.contrast, chroma: src.chroma,
+      noise: src.noise, shift: src.shift, cutout: src.cutout, mixup: 0
+    };
+    var px = inSize * inSize * 3;
+    var CH = 256;
+    var correct = 0;
+    var dummyY = new Float32Array(CH * NC);
+    for (var b = 0; b < n; b += CH) {
+      var end = Math.min(n, b + CH);
+      var cnt = end - b;
+      // 拷一份再增强：valX 是验证用的原始数据，被就地改掉的话
+      // 下一轮验证就测在脏数据上了
+      var arr = new Float32Array(valX.subarray(b * px, end * px));
+      augmentBatch(arr, dummyY, cnt, inSize, cfg);
+      var t = tf.tidy(function () {
+        var xs = tf.tensor4d(arr, [cnt, inSize, inSize, 3]);
+        return tf.argMax(model.apply(xs, { training: false }), -1);
+      });
+      var d = t.dataSync();
+      t.dispose();
+      for (var i = 0; i < d.length; i++) if (d[i] === valLabelsArr[b + i]) correct++;
+    }
+    return correct / n;
+  }
+
+  /**
+   * 训练集准确率（抽样）。
+   *
+   * 存在的意义是和验证集准确率**放在一起看**：
+   *   两个都低        → 欠拟合，模型根本没学会，该加容量/加轮数
+   *   训练高验证低    → 过拟合
+   *   两个都高但新图挂 → 数据太单一，只能靠增强（这正是本项目的情况）
+   * 只报一个数字的话，这三种情况完全分不出来。
+   */
+  async function quickTrainAcc(sampleN) {
+    var n = trainY.length / NC;
+    if (!n) return 0;
+    var take = Math.min(n, sampleN || 600);
+    var step = Math.max(1, Math.floor(n / take));
+    var px = inSize * inSize * 3;
+    var correct = 0, total = 0;
+    var CH = 200;
+    var i = 0;
+    while (i < take) {
+      var cnt = Math.min(CH, take - i);
+      var arr = new Float32Array(cnt * px);
+      var truth = new Int32Array(cnt);
+      for (var k = 0; k < cnt; k++) {
+        var src = (i + k) * step;
+        if (src >= n) src = n - 1;
+        arr.set(trainX.subarray(src * px, src * px + px), k * px);
+        var off = src * NC, best = 0;
+        for (var c = 1; c < NC; c++) if (trainY[off + c] > trainY[off + best]) best = c;
+        truth[k] = best;
+      }
+      var t = tf.tidy(function () {
+        var xs = tf.tensor4d(arr, [cnt, inSize, inSize, 3]);
+        return tf.argMax(model.apply(xs, { training: false }), -1);
+      });
+      var d = t.dataSync();
+      t.dispose();
+      for (var q = 0; q < d.length; q++) if (d[q] === truth[q]) correct++;
+      total += cnt;
+      i += cnt;
+    }
+    return total ? correct / total : 0;
+  }
+
   // ------------------------------------------------ 用训练好的模型跑单张图
 
   /** 对一张已标定的图逐格推理，返回 90 个预测类别 */
-  async function predictCells(s, size) {
+  async function predictCells(s, size, offX, offY) {
     if (!model) return null;
     var img = await imageOf(s);
     var px = size * size * 3;
-    var data = cropCells(img, s.lattice, s.w, s.h, size);
+    var data = cropCells(img, s.lattice, s.w, s.h, size, offX, offY);
     var arr = new Float32Array(CELLS * px);
     for (var i = 0; i < arr.length; i++) arr[i] = data[i] / 255;
 
@@ -4175,6 +4470,38 @@
     for (var j = 0; j < CELLS; j++) out[j] = d[j];
     return out;
   }
+
+  /**
+   * 标定偏移扫描 —— 「换一张新图就不认了」时最该先做的一件事。
+   *
+   * 把裁切中心在 ±maxOff 像素内平移，逐个测准确率。如果最佳偏移下明显更准，
+   * 说明问题**不在模型而在定位**：喂进去的格子本身是偏的，
+   * 模型看到的永远是「棋子歪在角落里」的样子 —— 那是训练时从没见过的情况。
+   *
+   * 这两件事的处理方式正好相反（一个要重训/加增强，一个只要重标定），
+   * 不给这个判断，用户只能靠猜，而猜错的代价是白训好几次。
+   */
+  async function scanShift(s, maxOff, step) {
+    var truth = s.cells;
+    if (!truth) return null;
+    var best = null, zero = null;
+    for (var oy = -maxOff; oy <= maxOff; oy += step) {
+      for (var ox = -maxOff; ox <= maxOff; ox += step) {
+        var pred = await predictCells(s, inSize, ox, oy);
+        if (!pred) return null;
+        var hit = 0;
+        for (var i = 0; i < CELLS; i++) if (pred[i] === truth[i]) hit++;
+        var acc = hit / CELLS;
+        if (!best || acc > best.acc) best = { ox: ox, oy: oy, acc: acc };
+        if (ox === 0 && oy === 0) zero = { ox: 0, oy: 0, acc: acc };
+      }
+    }
+    return { best: best, zero: zero };
+  }
+
+  // 回测附带出来的诊断结论（都可能为空）
+  var backtestShift = [];      // 判定为「格子定位偏了」
+  var shiftModelIssue = [];    // 判定为「模型真的不认这类图」
 
   /** 对比预测与人工标注 */
   function diffOf(s, pred) {
@@ -4587,9 +4914,50 @@
     return html;
   }
 
-  function renderEval(r, secondsPerEpoch, totalSeconds) {
-    var html =
-      '<div class="statline"><span>验证集准确率</span><b class="big">' + fmt(r.acc * 100, 2) + '%</b></div>' +
+  /**
+   * 泛化体检报告 —— 本次改动的重点输出。
+   *
+   * 三个数字必须摆在一起看，单看任何一个都会得出错误结论：
+   *   训练高 / 验证高 / 抗扰低 → 「只会认这一种棋盘」，数据太单一（本项目的老毛病）
+   *   训练高 / 验证低          → 过拟合
+   *   三个都低                 → 欠拟合，容量或轮数不够
+   * 用户真正要的是最后那个数字，因为真实使用时给他看的就是"新图"。
+   */
+  function genReportHtml(gen, r) {
+    var tr = gen.train * 100, val = r.acc * 100, nz = gen.noisy * 100;
+    var drop = val - nz;
+    var verdict, cls;
+    if (drop > 15) {
+      verdict = '抗扰掉得厉害（' + fmt(drop, 1) + ' 个点）—— 模型仍在靠记像素，' +
+                '换一种棋盘主题或亮度就会挂。把「数据增强」调高一档，' +
+                '再补几张不同来源的图。';
+      cls = 'predbadge';
+    } else if (drop > 7) {
+      verdict = '抗扰掉了 ' + fmt(drop, 1) + ' 个点，还在可接受范围。' +
+                '能再多几张不同来源的图会更稳。';
+      cls = 'predmid';
+    } else {
+      verdict = '抗扰只掉 ' + fmt(drop, 1) + ' 个点 —— 模型学的是棋子的样子，' +
+                '不是这批截图的像素值，换新图基本站得住。';
+      cls = 'predok';
+    }
+    if (tr - val > 12) {
+      verdict += ' 训练图比验证图高 ' + fmt(tr - val, 1) + ' 个点，也有过拟合迹象。';
+    }
+    return '<div class="statline"><span>训练图准确率</span><b>' + fmt(tr, 2) + '%</b></div>' +
+      '<div class="statline"><span>验证图准确率</span><b>' + fmt(val, 2) + '%</b></div>' +
+      '<div class="statline"><span>模拟新图准确率<br>' +
+        '<span class="tiny muted">验证图 + 亮度 / 色调 / 位移 / 遮挡</span></span>' +
+        '<b class="big">' + fmt(nz, 2) + '%</b></div>' +
+      '<div class="mt8 tiny"><span class="' + cls + '">' + verdict + '</span></div>';
+  }
+
+  function renderEval(r, secondsPerEpoch, totalSeconds, gen) {
+    var html = gen
+      ? genReportHtml(gen, r)
+      : '<div class="statline"><span>验证集准确率</span><b class="big">' + fmt(r.acc * 100, 2) + '%</b></div>';
+
+    html +=
       '<div class="statline"><span>非空格子准确率</span><b class="big">' + fmt(r.deepAcc * 100, 2) + '%</b></div>' +
       '<div class="statline"><span>验证切片</span><b>' + r.n + '（非空 ' + r.deepTotal + '）</b></div>' +
       '<div class="statline"><span>训练耗时</span><b>' + fmt(totalSeconds, 0) + 's</b></div>' +
@@ -4749,6 +5117,77 @@
     if (btn) { btn.disabled = false; btn.textContent = '逐图回测'; }
     if (btn2) btn2.disabled = false;
 
+    // ---- 定位诊断 ----
+    // 只对错得最多的几张做。扫描本身很便宜（每张几十次推理），
+    // 但只在"有图错得离谱"时才有意义 —— 全对的图扫描出来也是全对。
+    backtestShift = [];
+    shiftModelIssue = [];
+    /*
+     * 按**错误程度分档**取样，而不是简单地"取错得最多的 4 张"。
+     *
+     * 直接取前几名在"换了一种棋盘主题"时会失效：那时前几名全被整张全错的图占满，
+     * 而一张只是框歪了 9 像素的图（错 18 格）永远排不进配额 ——
+     * 于是"定位问题"这条路一次都不会被走到，等于没有。
+     * 分档之后两类问题都能被看到。
+     */
+    var badRows = rows.filter(function (r) { return r.wrong >= 8; })
+                      .sort(function (a, b) { return b.wrong - a.wrong; });
+    var buckets = [[], [], []];      // 近乎全错 / 错一半 / 错一些
+    badRows.forEach(function (r) {
+      var rate = r.wrong / CELLS;
+      var bi = rate > 0.7 ? 0 : (rate > 0.3 ? 1 : 2);
+      if (buckets[bi].length < 2) buckets[bi].push(r);
+    });
+    var worst = buckets[0].concat(buckets[1]).concat(buckets[2]);
+
+    if (worst.length) {
+      btn.textContent = '定位诊断…';
+      for (var wi = 0; wi < worst.length; wi++) {
+        var sw = null;
+        for (var qi = 0; qi < u.length; qi++) {
+          if (u[qi].key === worst[wi].key) { sw = u[qi]; break; }
+        }
+        if (!sw) continue;
+        try {
+          // 扫 ±9 像素、步长 3（49 次推理，一张约两秒）。
+          // 范围取 ±9 是因为 64px 的格子下这就是 14% 的偏差 ——
+          // 再大肉眼就能看出框歪了，不需要靠这个诊断。
+          // 步长 3 只影响"能不能定位到确实有用"这个判断，不需要亚像素精度。
+          var rs = await scanShift(sw, 9, 3);
+          if (rs && rs.best && rs.zero) {
+            var gain = rs.best.acc - rs.zero.acc;
+            /*
+             * 判据必须两段都满足：挪一下有改善，**而且挪完真的能用了**。
+             *
+             * 只看"有改善"会误报 —— 一张全错的图随便挪一点都会好一点，
+             * 但 2% → 28% 显然还是不能用，那是模型不认，不是框歪了。
+             * 刚开始我只写了前半段，结果把"模型完全没见过这种图"
+             * 误判成了"标定偏了"，给出的建议正好是错的那个。
+             */
+            if (gain > 0.08 && rs.best.acc >= 0.6) {
+              backtestShift.push({
+                name: sw.name, zero: rs.zero.acc, best: rs.best.acc,
+                ox: rs.best.ox, oy: rs.best.oy, wrong: worst[wi].wrong
+              });
+            } else if (rs.zero.acc < 0.6) {
+              shiftModelIssue.push({ name: sw.name, acc: rs.zero.acc, best: rs.best.acc });
+            }
+          }
+        } catch (e) {
+          log('定位诊断失败（' + sw.name + '）：' + e.message);
+        }
+        await yieldTick();
+      }
+      if (btn) btn.textContent = '逐图回测';
+      if (backtestShift.length) {
+        log('定位诊断：' + backtestShift.length + ' 张图挪一下偏移就明显变准 —— 问题在标定，不在模型');
+      }
+      if (shiftModelIssue.length) {
+        log('定位诊断：' + shiftModelIssue.length + ' 张图怎么挪都不行（最好也只有 ' +
+            fmt(shiftModelIssue[0].best * 100, 0) + '%）—— 是模型没见过这类图，不是标定问题');
+      }
+    }
+
     backtestRows = rows;
     backtestGroups = g;
     backtestConf = conf;
@@ -4774,6 +5213,42 @@
         renderBacktest(backtestRows, backtestGroups, backtestConf);
       });
     });
+  }
+
+  /**
+   * 定位诊断的结论。
+   *
+   * 措辞必须给出**下一步做什么**，不能只报现象 ——
+   * 「有 3 张图偏移 2px 后变准」这种话，不说该怎么办等于没说，
+   * 而用户自己猜的话，最可能的动作恰恰是最没用的那个（重新训练）。
+   */
+  function shiftDiagHtml() {
+    var items = backtestShift.map(function (r) {
+      return escapeHtml(r.name) + '（偏移 ' +
+        (r.ox > 0 ? '+' : '') + r.ox + ',' + (r.oy > 0 ? '+' : '') + r.oy +
+        'px 后 ' + fmt(r.zero * 100, 0) + '→' + fmt(r.best * 100, 0) + '%）';
+    }).join('；');
+    return '<div class="mt8 tiny"><span class="predbadge">' +
+      '<b>这几张不像是模型的问题</b> —— 把裁切中心挪几个像素，准确率就明显上去了：' +
+      items + '。说明是格子定位偏了，不是模型不认棋子。' +
+      '到「标注」页切到微调模式，把框挪一挪，比重训一次有效得多。</span></div>';
+  }
+
+  /**
+   * 判定为「模型真的不认这类图」时的结论。
+   *
+   * 和 shiftDiagHtml 是一对：那个说"别重训，去挪框"，
+   * 这个说"挪框没用，得重训"。给反了的话，用户会朝完全错误的方向使劲。
+   */
+  function modelIssueHtml() {
+    var items = shiftModelIssue.map(function (r) {
+      return escapeHtml(r.name) + '（' + fmt(r.acc * 100, 0) + '%，最好的偏移也只有 ' +
+        fmt(r.best * 100, 0) + '%）';
+    }).join('；');
+    return '<div class="mt8 tiny"><span class="predbadge">' +
+      '<b>这几张是模型真的不认</b> —— 格子怎么挪都不行，说明它没见过这类图：' +
+      items + '。到「训练」页把「数据增强」调到「强」重训一次，' +
+      '并尽量把这种来源的图也加进样本里。</span></div>';
   }
 
   function renderBacktest(rows, g, conf) {
@@ -4803,6 +5278,8 @@
       fmt(pct(g.train.neWrong + g.val.neWrong, g.train.neTotal + g.val.neTotal), 2) + '%</b></div>' +
       '<div class="statline"><span>回测范围</span><b>' + rows.length + ' 张已标注图</b></div>' +
       '<div class="mt8 tiny"><span class="' + vclass + '">' + verdict + '</span></div>' +
+      (backtestShift.length ? shiftDiagHtml() : '') +
+      (shiftModelIssue.length ? modelIssueHtml() : '') +
       (conf ? matrixHtml(conf) : '');
 
     var shown = rows.filter(function (r) { return !backtestOnlyWrong || r.wrong > 0; });
@@ -4836,6 +5313,11 @@
     var epochs = clamp(parseInt($('pEpochs').value, 10) || 40, 1, 400);
     var batch = clamp(parseInt($('pBatch').value, 10) || 64, 8, 512);
     var size = inSize;
+    // 数据增强与标签平滑，共同的性质是「为了在新图上少犯错，
+    // 宁愿在训练图上稍微降一点分」。所以它们只在训练时生效，
+    // 验证和回测一律走原图 —— 否则分数就不可比了。
+    var aug = augCfgOf($('pAug') ? $('pAug').value : 'normal');
+    var smooth = clamp(parseFloat($('pSmooth') ? $('pSmooth').value : 0) || 0, 0, 0.3);
 
     $('btnTrain').disabled = true;
     $('btnBuild').disabled = true;
@@ -4855,7 +5337,13 @@
     model.layers.forEach(function (l) { l.getWeights().forEach(function (w) { params += w.size; }); });
     log('模型参数量 ' + params.toLocaleString() + ' · 输入 ' + size + '×' + size + ' · 类别 ' + NC);
 
-    var opt = tf.train.adam(1e-3);
+    // cosine 衰减：从 LR_MAX 平滑降到 LR_MIN。
+    // 固定学习率的两难是前期收敛慢、后期在最优点附近来回跳；
+    // 余弦调度一开始用大步找方向，末尾用很小步精修，正好兼顾。
+    // 末尾这一步对泛化尤其重要 —— 最后几轮的小步会让模型落在一个更「宽」的解上，
+    // 而宽的解对新图更宽容。
+    var LR_MAX = 1e-3, LR_MIN = 1e-5;
+    var opt = tf.train.adam(LR_MAX);
     var t0 = performance.now();
     var firstEpoch = 0, lastEpoch = 0;
     var lossHist = [];
@@ -4866,13 +5354,17 @@
     var stoppedEarly = false;
 
     for (var ep = 0; ep < epochs && !stopFlag; ep++) {
+      var lrNow = LR_MIN + (LR_MAX - LR_MIN) * 0.5 *
+                  (1 + Math.cos(Math.PI * ep / Math.max(1, epochs)));
+      opt.learningRate = lrNow;
+
       var order = shuffledOrder();
       var epStart = performance.now();
       var lossSum = 0, batches = 0;
 
       for (var b = 0; b < nTrainSamples; b += batch) {
         var to = Math.min(nTrainSamples, b + batch);
-        var bt = makeBatch(order, b, to, size);
+        var bt = makeBatch(order, b, to, size, null, aug, smooth);
         var lossVal = opt.minimize(function () {
           var logits = model.apply(bt.xs, { training: true });
           return tf.losses.softmaxCrossEntropy(bt.ys, logits).mean();
@@ -4908,7 +5400,8 @@
       $('trainStat').innerHTML =
         '第 ' + (ep + 1) + '/' + epochs + ' 轮 · loss <b>' + fmt(epLoss, 4) +
         '</b> · 验证 <b>' + fmt(valAcc * 100, 1) + '%</b>' +
-        '<br><span class="muted">本轮 ' + fmt(epMs / 1000, 1) + 's · ' + thru +
+        '<br><span class="muted">lr ' + lrNow.toExponential(0) +
+        ' · 本轮 ' + fmt(epMs / 1000, 1) + 's · ' + thru +
         ' 样本/秒 · 已用 ' + fmt(elapsed, 0) + 's</span>';
       $('etaText').textContent = remain > 0
         ? '预计还需 ' + (remain >= 60 ? fmt(remain / 60, 1) + ' 分钟' : fmt(remain, 0) + ' 秒') +
@@ -4939,12 +5432,29 @@
 
     try {
       log('在验证集上评估…');
+      // ---- 泛化体检 ----
+      // 训练图和验证图来自同一次采集，所以两个都高并不说明能认新图。
+      // 这里再加一道：把验证图整体加扰动（亮度/色调/位移/遮挡）重测一遍。
+      // 这个数字才是「换张新图会不会挂」最接近的模拟。
+      var gen = null;
+      try {
+        var accTr = await quickTrainAcc(600);
+        var accNz = await quickValAccNoisy('strong');
+        gen = { train: accTr, noisy: accNz };
+        log('泛化体检：训练图 ' + fmt(accTr * 100, 1) + '% · 模拟新图 ' +
+            fmt(accNz * 100, 1) + '%');
+      } catch (e) {
+        log('泛化体检失败：' + e.message);
+      }
+
       var r = await evaluate();
       if (r) {
-        renderEval(r, lastEpoch / 1000, total);
+        renderEval(r, lastEpoch / 1000, total, gen);
         log('验证准确率 ' + fmt(r.acc * 100, 2) + '% · 非空 ' + fmt(r.deepAcc * 100, 2) + '%');
         currentMeta = '验证集 ' + fmt(r.acc * 100, 1) + '% / 非空 ' + fmt(r.deepAcc * 100, 1) +
-          '% · 样本 ' + usable().length + ' 张 · ' + epochs + ' 轮';
+          '%' + (gen ? ' / 抗扰 ' + fmt(gen.noisy * 100, 1) + '%' : '') +
+          ' · 样本 ' + usable().length + ' 张 · ' + epochs + ' 轮 · 增强' +
+          augCfgOf($('pAug') ? $('pAug').value : 'normal').label;
       }
 
       // 自动留一份：不然关掉应用模型就没了，隔天想回测还得重训
@@ -5168,7 +5678,9 @@
 
         for (var b = 0; b < trainOrder.length; b += batchSize) {
           var to = Math.min(trainOrder.length, b + batchSize);
-          var bt = makeBatch(trainOrder, b, to, inSize, weights);
+          // 微调也走增强，但只用「轻」档 —— 这一步的目标是把人工改对的那几格学进去，
+          // 扰动太重反而学不准。防遗忘靠的是旧数据回放，不是把图变形到认不出。
+          var bt = makeBatch(trainOrder, b, to, inSize, weights, augCfgOf('light'), 0);
           var lv = opt.minimize(function () {
             var logits = model.apply(bt.xs, { training: true });
             // 逐样本损失再按权重平均 —— 这是「让模型重点学我改过的地方」

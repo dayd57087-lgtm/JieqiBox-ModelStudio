@@ -57,6 +57,19 @@
   PB.prototype.tag = function (field, wire) { this.varint(field * 8 + wire); };
   PB.prototype.int = function (field, v) { this.tag(field, 0); this.varint(v); };
 
+  /**
+   * float32 字段（wire type 5）。
+   * 注意 AttributeProto 里 f 是 **field 2**，field 3 是 int64 的 i ——
+   * 写错不会报解析失败，只会静默读成别的字段（这里就是读成 0），
+   * 所以这个编号必须照 onnx.proto 抄，不能凭印象。
+   */
+  PB.prototype.float = function (field, v) {
+    this.tag(field, 5);
+    this.grow(4);
+    new DataView(this.buf.buffer, this.buf.byteOffset + this.n, 4).setFloat32(0, v, true);
+    this.n += 4;
+  };
+
   PB.prototype.bytes = function (field, b) {
     this.tag(field, 2);
     this.varint(b.length);
@@ -97,7 +110,7 @@
   var DT_FLOAT = 1;
   var DT_INT64 = 7;
   // AttributeProto.AttributeType
-  var AT_INT = 2, AT_INTS = 7;
+  var AT_FLOAT = 1, AT_INT = 2, AT_INTS = 7;
 
   function tensorFloat(name, dims, data) {
     var p = new PB();
@@ -147,6 +160,7 @@
       p.sub(5, function (ap) {
         ap.str(1, a.name);
         if (a.ints) { ap.ints(8, a.ints); ap.int(20, AT_INTS); }
+        else if (a.f !== undefined) { ap.float(2, a.f); ap.int(20, AT_FLOAT); }
         else { ap.int(3, a.i); ap.int(20, AT_INT); }
       });
     });
@@ -223,7 +237,7 @@
     nodes.push(node('Transpose', [cur], [t], [{ name: 'perm', ints: [0, 3, 1, 2] }]));
     cur = t;
 
-    var convCount = 0, poolCount = 0, denseCount = 0, skipped = [];
+    var convCount = 0, poolCount = 0, denseCount = 0, bnCount = 0, skipped = [];
 
     for (var i = 0; i < model.layers.length; i++) {
       var L = model.layers[i];
@@ -235,16 +249,24 @@
         var kh = kd[0], kw = kd[1], inC = kd[2], outC = kd[3];
         var strides = L.strides || [1, 1];
         var Wn = nm('W' + (++convCount));
-        var Bn = nm('B' + convCount);
         inits.push(tensorFloat(Wn, [outC, inC, kh, kw],
           convKernelToOnnx(kd, w[0].dataSync())));
-        inits.push(tensorFloat(Bn, [outC], w[1].dataSync()));
+
+        // bias 在 ONNX 里是可选的。新结构里卷积后面紧跟 BN，所以 conv 设了
+        // useBias:false —— 这时 getWeights() 只返回 kernel 一项，
+        // 硬取 w[1].dataSync() 会拿到 undefined 而报一个和 bias 毫无关系的错。
+        var convIn = [cur, Wn];
+        if (w.length > 1) {
+          var Bn = nm('B' + convCount);
+          inits.push(tensorFloat(Bn, [outC], w[1].dataSync()));
+          convIn.push(Bn);
+        }
 
         var pads = [0, 0, 0, 0];
         if (L.padding === 'same') pads = samePads(kh, kw, strides, spatial);
 
         var cn = nm('conv');
-        nodes.push(node('Conv', [cur, Wn, Bn], [cn], [
+        nodes.push(node('Conv', convIn, [cn], [
           { name: 'kernel_shape', ints: [kh, kw] },
           { name: 'strides', ints: [strides[0], strides[1]] },
           { name: 'pads', ints: pads },
@@ -274,6 +296,31 @@
         cur = pn;
         spatial = Math.floor(spatial / pst[0]);
         poolCount++;
+
+      } else if (cls === 'BatchNormalization') {
+        // TF.js 的权重顺序是 [gamma, beta, movingMean, movingVariance]，
+        // ONNX 的输入顺序是 X, scale, B, mean, var —— 逐个对应。
+        // 这里一项一项写出来而不是靠数组顺序凑，是为了以后换实现时不至于悄悄错位。
+        if (w.length !== 4) {
+          throw new Error('BatchNormalization 的权重个数异常（' + w.length + '），' +
+                          '只有 center+scale 都开着的标准配置才支持导出');
+        }
+        var nc = w[0].shape[0];
+        var gs = nm('bn_scale'), gb = nm('bn_bias');
+        var gm = nm('bn_mean'), gv = nm('bn_var');
+        inits.push(tensorFloat(gs, [nc], w[0].dataSync()));
+        inits.push(tensorFloat(gb, [nc], w[1].dataSync()));
+        inits.push(tensorFloat(gm, [nc], w[2].dataSync()));
+        inits.push(tensorFloat(gv, [nc], w[3].dataSync()));
+        var bnOut = nm('bn');
+        // epsilon 直接搬 TF.js 的值（默认 1e-3，而 ONNX 的默认是 1e-5）——
+        // 两边不一致的话，推理结果会和训练时有系统性偏差
+        nodes.push(node('BatchNormalization', [cur, gs, gb, gm, gv], [bnOut], [
+          { name: 'epsilon', f: (L.epsilon === undefined ? 1e-3 : L.epsilon) },
+          { name: 'momentum', f: 0.99 }
+        ]));
+        cur = bnOut;
+        bnCount++;
 
       } else if (cls === 'Flatten') {
         // NCHW 的展平顺序是 (c,h,w)，而 TF.js 训练时用的是 NHWC 的 (h,w,c)。
@@ -369,6 +416,7 @@
         conv: convCount,
         pool: poolCount,
         dense: denseCount,
+        bn: bnCount,
         spatial: spatial,
         params: model.countParams ? model.countParams() : 0
       }
